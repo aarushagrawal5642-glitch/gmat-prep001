@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
+ import SectionalTest from "./sectional-test";
+import "katex/dist/katex.min.css";
+import Latex from "react-latex-next";
 import { 
   BookOpen, 
   Video, 
@@ -208,6 +211,7 @@ export default function App() {
                   <SidebarItem icon={BookOpen} label="Course Materials" active={activeTab === "courses"} onClick={() => { setActiveTab("courses"); setIsMobileMenuOpen(false); }} />
                   <SidebarItem icon={Video} label="Video Lectures" active={activeTab === "videos"} onClick={() => { setActiveTab("videos"); setIsMobileMenuOpen(false); }} />
                   <SidebarItem icon={ClipboardList} label="Daily Practice" active={activeTab === "daily-test"} onClick={() => { setActiveTab("daily-test"); setIsMobileMenuOpen(false); }} />
+                   <SidebarItem icon={ClipboardList} label="Sectional Tests" active={activeTab === "sectional"} onClick={() => setActiveTab("sectional")} />
                   <SidebarItem icon={History} label="Test History" active={activeTab === "history"} onClick={() => { setActiveTab("history"); setIsMobileMenuOpen(false); }} />
                   <SidebarItem icon={BarChart3} label="Analytics" active={activeTab === "analytics"} onClick={() => { setActiveTab("analytics"); setIsMobileMenuOpen(false); }} />
                   
@@ -251,6 +255,7 @@ export default function App() {
             <SidebarItem icon={BookOpen} label="Course Materials" active={activeTab === "courses"} onClick={() => setActiveTab("courses")} />
             <SidebarItem icon={Video} label="Video Lectures" active={activeTab === "videos"} onClick={() => setActiveTab("videos")} />
             <SidebarItem icon={ClipboardList} label="Daily Practice" active={activeTab === "daily-test"} onClick={() => setActiveTab("daily-test")} />
+            <SidebarItem icon={ClipboardList} label="Sectional Tests" active={activeTab === "sectional"} onClick={() => setActiveTab("sectional")} />
             <SidebarItem icon={History} label="Test History" active={activeTab === "history"} onClick={() => setActiveTab("history")} />
             <SidebarItem icon={BarChart3} label="Analytics" active={activeTab === "analytics"} onClick={() => setActiveTab("analytics")} />
             
@@ -291,6 +296,7 @@ export default function App() {
             {activeTab === "courses" && <CourseMaterials />}
             {activeTab === "videos" && <VideoLectures />}
             {activeTab === "daily-test" && <DailyTest user={user} />}
+           {activeTab === "sectional" && <SectionalTest user={user} />}
             {activeTab === "history" && <TestHistory user={user} />}
             {activeTab === "analytics" && <Analytics user={user} />}
             {activeTab === "admin" && <AdminDashboard user={user} />}
