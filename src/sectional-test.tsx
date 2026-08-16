@@ -591,7 +591,7 @@ export default function SectionalTest({ user }: { user: any }) {
         <header>
           <h1 className="text-3xl font-bold tracking-tight">Sectional Tests</h1>
           <p className="text-muted-foreground mt-1">
-            CAT-pattern section-wise mocks · 40 min · Real exam interface
+            GMAT-pattern section-wise mocks · 40 min · Real exam interface
           </p>
         </header>
 
