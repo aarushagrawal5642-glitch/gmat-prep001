@@ -21,23 +21,24 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { apiRequest } from "@/src/lib/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+// GMAT Focus Edition sections
+type GmatSection = "Quant" | "Verbal" | "DataInsights";
+
 interface SectionalQuestion {
   id: string;
-  section: "VARC" | "DILR" | "Quantitative";
+  section: GmatSection;
   questionText: string;
   options: string[];
   correctAnswer: string;
   explanation: string;
   difficulty: "Easy" | "Medium" | "Hard";
-  passageId?: string; // for RC passages
-  questionType?: "MCQ" | "TITA"; // optional explicit flag; falls back to options.length
+  passageId?: string; // for RC / Multi-Source Reasoning passages
 }
 
 interface Passage {
@@ -49,7 +50,7 @@ interface Passage {
 interface SectionalTest {
   id: string;
   name: string;
-  section: "VARC" | "DILR" | "Quantitative";
+  section: GmatSection;
   durationMinutes: number;
   questions: SectionalQuestion[];
   passages?: Passage[];
@@ -58,49 +59,66 @@ interface SectionalTest {
 interface SectionalResult {
   testId: string;
   section: string;
-  totalScore: number;
+  totalScore: number; // accuracy %
   correctAnswers: number;
   wrongAnswers: number;
   skippedQuestions: number;
   timeSpent: number;
   studentAnswers: Record<string, string>;
-  scaledScore: number; // CAT-style scaled score (0-100)
+  scaledScore: number; // GMAT-style scaled score, 60–90
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+// GMAT Focus Edition: 3 sections, 45 minutes each, no negative marking.
+// (Actual GMAT scoring is computer-adaptive; scaledScore here is an
+// approximation for practice purposes, mapped from raw accuracy.)
 
-const SECTION_META = {
-  VARC: {
-    label: "Verbal Ability & Reading Comprehension",
-    short: "VARC",
+const SECTION_META: Record<
+  GmatSection,
+  {
+    label: string;
+    short: string;
+    color: string;
+    lightColor: string;
+    textColor: string;
+    borderColor: string;
+    questions: number;
+    minutes: number;
+  }
+> = {
+  Quant: {
+    label: "Quantitative Reasoning",
+    short: "Quant",
+    color: "bg-emerald-500",
+    lightColor: "bg-emerald-50",
+    textColor: "text-emerald-700",
+    borderColor: "border-emerald-200",
+    questions: 21,
+    minutes: 45,
+  },
+  Verbal: {
+    label: "Verbal Reasoning",
+    short: "Verbal",
     color: "bg-violet-500",
     lightColor: "bg-violet-50",
     textColor: "text-violet-700",
     borderColor: "border-violet-200",
-    questions: 24,
-    minutes: 40,
+    questions: 23,
+    minutes: 45,
   },
-  DILR: {
-    label: "Data Interpretation & Logical Reasoning",
-    short: "DILR",
+  DataInsights: {
+    label: "Data Insights",
+    short: "DI",
     color: "bg-blue-500",
     lightColor: "bg-blue-50",
     textColor: "text-blue-700",
     borderColor: "border-blue-200",
     questions: 20,
-    minutes: 40,
-  },
-  Quantitative: {
-    label: "Quantitative Ability",
-    short: "QA",
-    color: "bg-emerald-500",
-    lightColor: "bg-emerald-50",
-    textColor: "text-emerald-700",
-    borderColor: "border-emerald-200",
-    questions: 22,
-    minutes: 40,
+    minutes: 45,
   },
 };
+
+const SECTION_ORDER: GmatSection[] = ["Quant", "Verbal", "DataInsights"];
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 // Renders text with \n\n-separated paragraphs as separate <p> blocks,
@@ -125,40 +143,15 @@ function formatTime(seconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function calcScaledScore(correct: number, wrong: number, total: number) {
-  // CAT-style: +3 correct, -1 wrong; scaled to 0–100
-  const raw = correct * 3 - wrong;
-  const maxRaw = total * 3;
-  return Math.max(0, Math.round((raw / maxRaw) * 100));
+// GMAT-style scaled score approximation: no negative marking, so this is
+// purely a function of accuracy, mapped onto the real GMAT section band
+// of 60–90.
+function calcScaledScore(correct: number, total: number) {
+  if (total === 0) return 60;
+  const accuracy = correct / total;
+  return Math.round(60 + accuracy * 30);
 }
 
-// A question is TITA (type-in-the-answer) if it's explicitly flagged as such,
-// or if it simply has no options to choose from.
-function isTitaQuestion(q: SectionalQuestion) {
-  if (q.questionType) return q.questionType === "TITA";
-  return !Array.isArray(q.options) || q.options.filter(Boolean).length === 0;
-}
-
-// TITA answers are graded as a normalized string match (case-insensitive,
-// trimmed, with collapsed whitespace) so small formatting differences
-// (e.g. trailing spaces, "12" vs "12 ") don't count against the student.
-// For numeric-looking answers, also compare numerically so "12" === "12.0".
-function normalizeTitaAnswer(val: string) {
-  return (val || "").trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function isTitaCorrect(studentAns: string, correctAns: string) {
-  if (!studentAns) return false;
-  const a = normalizeTitaAnswer(studentAns);
-  const b = normalizeTitaAnswer(correctAns);
-  if (a === b) return true;
-  const numA = Number(a);
-  const numB = Number(b);
-  if (!Number.isNaN(numA) && !Number.isNaN(numB)) {
-    return numA === numB;
-  }
-  return false;
-}
 const IMAGE_URL_REGEX = /(?:!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|\[image:\s*(https?:\/\/[^\]]+)\]|(https?:\/\/\S+\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?[^\s]*)?(?=#|\s|$)))/gi;
 
 type PassageSegment =
@@ -171,6 +164,9 @@ type PassageSegment =
  *   - Bare image URLs:  https://example.com/chart.png
  *   - Markdown images:  ![alt text](https://example.com/chart.png)
  *   - Tagged images:    [image: https://example.com/chart.png]
+ *
+ * Used for Verbal RC passages as well as Data Insights stimuli
+ * (Multi-Source Reasoning tabs, Table Analysis, Graphics Interpretation).
  */
 function parsePassageSegments(text: string): PassageSegment[] {
   const normalized = text.replace(/\\n/g, "\n");
@@ -334,7 +330,7 @@ function StatusDot({
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function SectionalTest({ user }: { user: any }) {
+export default function sectionalTest({ user }: { user: any }) {
   const [view, setView] = useState<"list" | "instructions" | "test" | "result">("list");
   const [availableTests, setAvailableTests] = useState<SectionalTest[]>([]);
   const [attempts, setAttempts] = useState<Record<string, SectionalResult>>({});
@@ -344,7 +340,6 @@ export default function SectionalTest({ user }: { user: any }) {
   // Test state
   const [currentIdx, setCurrentIdx] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [titaDraft, setTitaDraft] = useState(""); // local input buffer for the current TITA question
   const [flagged, setFlagged] = useState<Set<string>>(new Set());
   const [timeLeft, setTimeLeft] = useState(0);
   const [submitted, setSubmitted] = useState(false);
@@ -409,15 +404,6 @@ export default function SectionalTest({ user }: { user: any }) {
     }
   }, [currentIdx, selectedTest, view]);
 
-  // Sync the local TITA input buffer whenever the current question changes
-  useEffect(() => {
-    if (!selectedTest || view !== "test") return;
-    const q = selectedTest.questions[currentIdx];
-    if (q && isTitaQuestion(q)) {
-      setTitaDraft(answers[q.id] || "");
-    }
-  }, [currentIdx, selectedTest, view]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ── Actions ──────────────────────────────────────────────────────────────
   const startTest = async (test: SectionalTest) => {
     // If already attempted, fetch full test for review then show result
@@ -463,9 +449,8 @@ export default function SectionalTest({ user }: { user: any }) {
     }
     setCurrentIdx(0);
     setAnswers({});
-    setTitaDraft("");
     setFlagged(new Set());
-    setTimeLeft((selectedTest.durationMinutes || 40) * 60);
+    setTimeLeft((selectedTest.durationMinutes || 45) * 60);
     setSubmitted(false);
     setResult(null);
     setReviewMode(false);
@@ -483,33 +468,8 @@ export default function SectionalTest({ user }: { user: any }) {
     []
   );
 
-  // Commit the TITA draft into the answers map (called on change/blur/nav)
-  const commitTitaAnswer = useCallback((qId: string, val: string) => {
-    setAnswers((prev) => {
-      const next = { ...prev };
-      if (val.trim() === "") {
-        delete next[qId];
-      } else {
-        next[qId] = val;
-      }
-      return next;
-    });
-  }, []);
-
   const handleSubmit = useCallback(async () => {
     if (!selectedTest || submitted) return;
-
-    // Make sure the in-progress TITA draft is saved before grading
-    const currentQ = selectedTest.questions[currentIdx];
-    let finalAnswers = answers;
-    if (currentQ && isTitaQuestion(currentQ)) {
-      finalAnswers = { ...answers };
-      if (titaDraft.trim() === "") {
-        delete finalAnswers[currentQ.id];
-      } else {
-        finalAnswers[currentQ.id] = titaDraft;
-      }
-    }
 
     setSubmitted(true);
 
@@ -518,12 +478,9 @@ export default function SectionalTest({ user }: { user: any }) {
       skipped = 0;
 
     selectedTest.questions.forEach((q) => {
-      const ans = finalAnswers[q.id];
+      const ans = answers[q.id];
       if (!ans) {
         skipped++;
-      } else if (isTitaQuestion(q)) {
-        if (isTitaCorrect(ans, q.correctAnswer)) correct++;
-        else wrong++;
       } else if (ans === q.correctAnswer) {
         correct++;
       } else {
@@ -532,7 +489,7 @@ export default function SectionalTest({ user }: { user: any }) {
     });
 
     const total = selectedTest.questions.length;
-    const scaledScore = calcScaledScore(correct, wrong, total);
+    const scaledScore = calcScaledScore(correct, total);
     const totalScore = Math.round((correct / total) * 100);
     const timeSpent = selectedTest.durationMinutes * 60 - timeLeft;
 
@@ -544,7 +501,7 @@ export default function SectionalTest({ user }: { user: any }) {
       wrongAnswers: wrong,
       skippedQuestions: skipped,
       timeSpent,
-      studentAnswers: finalAnswers,
+      studentAnswers: answers,
       scaledScore,
     };
 
@@ -554,17 +511,15 @@ export default function SectionalTest({ user }: { user: any }) {
         body: JSON.stringify(payload),
       });
       setResult(payload);
-      setAnswers(finalAnswers);
       setAttempts((prev) => ({ ...prev, [selectedTest.id]: payload }));
       setView("result");
       toast.success("Section submitted!");
     } catch (err: any) {
       toast.error("Failed to save result");
       setResult(payload);
-      setAnswers(finalAnswers);
       setView("result");
     }
-  }, [selectedTest, submitted, answers, timeLeft, currentIdx, titaDraft]);
+  }, [selectedTest, submitted, answers, timeLeft]);
 
   // ─── VIEWS ──────────────────────────────────────────────────────────────────
 
@@ -578,26 +533,23 @@ export default function SectionalTest({ user }: { user: any }) {
 
   // ── LIST ────────────────────────────────────────────────────────────────────
   if (view === "list") {
-    const grouped = (["VARC", "DILR", "Quantitative"] as const).reduce(
-      (acc, sec) => {
-        acc[sec] = availableTests.filter((t) => t.section === sec);
-        return acc;
-      },
-      {} as Record<string, SectionalTest[]>
-    );
+    const grouped = SECTION_ORDER.reduce((acc, sec) => {
+      acc[sec] = availableTests.filter((t) => t.section === sec);
+      return acc;
+    }, {} as Record<GmatSection, SectionalTest[]>);
 
     return (
       <div className="space-y-8">
         <header>
-          <h1 className="text-3xl font-bold tracking-tight">Sectional Tests</h1>
+          <h1 className="text-3xl font-bold tracking-tight">GMAT Sectional Tests</h1>
           <p className="text-muted-foreground mt-1">
-            GMAT-pattern section-wise mocks · 40 min · Real exam interface
+            GMAT Focus Edition section-wise mocks · 45 min · Real exam interface
           </p>
         </header>
 
-        {/* CAT Pattern Info */}
+        {/* GMAT Pattern Info */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {(["VARC", "DILR", "Quantitative"] as const).map((sec) => {
+          {SECTION_ORDER.map((sec) => {
             const meta = SECTION_META[sec];
             return (
               <div
@@ -629,7 +581,7 @@ export default function SectionalTest({ user }: { user: any }) {
           </div>
         ) : (
           <div className="space-y-8">
-            {(["VARC", "DILR", "Quantitative"] as const).map((sec) => {
+            {SECTION_ORDER.map((sec) => {
               const tests = grouped[sec];
               if (!tests?.length) return null;
               const meta = SECTION_META[sec];
@@ -748,7 +700,7 @@ export default function SectionalTest({ user }: { user: any }) {
               {[
                 ["Questions", selectedTest.questions?.length],
                 ["Duration", `${selectedTest.durationMinutes} min`],
-                ["Marking", "+3 / –1"],
+                ["Marking", "No penalty"],
               ].map(([label, val]) => (
                 <div key={label} className="p-4 bg-secondary/30 rounded-xl">
                   <p className="text-2xl font-black">{val}</p>
@@ -762,8 +714,8 @@ export default function SectionalTest({ user }: { user: any }) {
               <h3 className="font-bold text-sm uppercase tracking-wide text-muted-foreground">Instructions</h3>
               {[
                 "This is a timed section test. The timer starts when you click Begin.",
-                "Each correct answer earns +3 marks. Each wrong answer deducts –1 mark. Unattempted questions carry 0 marks.",
-                "Some questions are Type-In-The-Answer (TITA) — there's no negative marking risk from guessing wrong, but you must type your answer in the box provided.",
+                "There is no negative marking on the GMAT — an incorrect answer costs you nothing beyond the question itself. Skipping still counts as unanswered.",
+                "Your scaled score (60–90) is estimated from your accuracy on this section, as an approximation of GMAT Focus Edition scoring.",
                 "You can navigate between questions freely and flag any question for later review.",
                 "Once time is up, the section auto-submits. You can also submit early.",
                 "Answers cannot be changed after submission.",
@@ -802,13 +754,8 @@ export default function SectionalTest({ user }: { user: any }) {
     const meta = SECTION_META[selectedTest.section];
     const answeredCount = Object.keys(answers).length;
     const progress = (answeredCount / questions.length) * 100;
-    const currentIsTita = isTitaQuestion(currentQ);
 
     const goToIdx = (newIdx: number) => {
-      // Persist whatever's in the TITA draft before navigating away
-      if (currentIsTita) {
-        commitTitaAnswer(currentQ.id, titaDraft);
-      }
       setCurrentIdx(newIdx);
     };
 
@@ -855,7 +802,7 @@ export default function SectionalTest({ user }: { user: any }) {
                 <CardHeader className="pb-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold uppercase text-muted-foreground tracking-wide">
-                      Reading Passage · {activePassage.title}
+                      {selectedTest.section === "DataInsights" ? "Stimulus" : "Reading Passage"} · {activePassage.title}
                     </span>
                   </div>
                 </CardHeader>
@@ -875,11 +822,6 @@ export default function SectionalTest({ user }: { user: any }) {
                     <span className={`text-xs font-bold px-2 py-0.5 rounded ${meta.lightColor} ${meta.textColor}`}>
                       Q {currentIdx + 1} / {questions.length}
                     </span>
-                    {currentIsTita && (
-                      <Badge variant="outline" className="text-[10px] font-bold">
-                        TITA
-                      </Badge>
-                    )}
                   </div>
                   <button
                     onClick={() => toggleFlag(currentQ.id)}
@@ -898,57 +840,35 @@ export default function SectionalTest({ user }: { user: any }) {
 </p>
               </CardHeader>
               <CardContent className="space-y-2">
-                {currentIsTita ? (
-                  <div className="space-y-2">
-                    <Label htmlFor="tita-input" className="text-xs font-bold uppercase text-muted-foreground">
-                      Type your answer
-                    </Label>
-                    <Input
-                      id="tita-input"
-                      type="text"
-                      inputMode="decimal"
-                      autoComplete="off"
-                      placeholder="Enter your answer here"
-                      value={titaDraft}
-                      onChange={(e) => setTitaDraft(e.target.value)}
-                      onBlur={() => commitTitaAnswer(currentQ.id, titaDraft)}
-                      className="text-base p-4 h-auto rounded-xl border-2 focus-visible:ring-1 focus-visible:ring-primary"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      No options are given for this question — enter the numeric or text value you've calculated.
-                    </p>
-                  </div>
-                ) : (
-                  <RadioGroup
-                    value={answers[currentQ.id] || ""}
-                    onValueChange={(val) =>
-                      setAnswers((prev) => ({ ...prev, [currentQ.id]: val }))
-                    }
-                  >
-                    {(Array.isArray(currentQ.options) ? currentQ.options : []).filter(Boolean).map((opt, idx) => (
-                      <Label
-                        key={opt}
-                        className={`flex items-center gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
+                <RadioGroup
+                  value={answers[currentQ.id] || ""}
+                  onValueChange={(val) =>
+                    setAnswers((prev) => ({ ...prev, [currentQ.id]: val }))
+                  }
+                >
+                  {(Array.isArray(currentQ.options) ? currentQ.options : []).filter(Boolean).map((opt, idx) => (
+                    <Label
+                      key={opt}
+                      className={`flex items-center gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
+                        answers[currentQ.id] === opt
+                          ? `border-primary bg-blue-50 ring-1 ring-primary`
+                          : "border-border hover:border-primary/30 hover:bg-secondary/30"
+                      }`}
+                    >
+                      <RadioGroupItem value={opt} id={`opt-${idx}`} className="sr-only" />
+                      <div
+                        className={`w-7 h-7 shrink-0 rounded-lg flex items-center justify-center font-bold text-xs border ${
                           answers[currentQ.id] === opt
-                            ? `border-primary bg-blue-50 ring-1 ring-primary`
-                            : "border-border hover:border-primary/30 hover:bg-secondary/30"
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-secondary text-muted-foreground border-border"
                         }`}
                       >
-                        <RadioGroupItem value={opt} id={`opt-${idx}`} className="sr-only" />
-                        <div
-                          className={`w-7 h-7 shrink-0 rounded-lg flex items-center justify-center font-bold text-xs border ${
-                            answers[currentQ.id] === opt
-                              ? "bg-primary text-primary-foreground border-primary"
-                              : "bg-secondary text-muted-foreground border-border"
-                          }`}
-                        >
-                          {String.fromCharCode(65 + idx)}
-                        </div>
-                        <span className="text-sm"><Latex>{opt}</Latex></span>
-                      </Label>
-                    ))}
-                  </RadioGroup>
-                )}
+                        {String.fromCharCode(65 + idx)}
+                      </div>
+                      <span className="text-sm"><Latex>{opt}</Latex></span>
+                    </Label>
+                  ))}
+                </RadioGroup>
               </CardContent>
             </Card>
 
@@ -965,9 +885,6 @@ export default function SectionalTest({ user }: { user: any }) {
               <Button
                 variant="ghost"
                 onClick={() => {
-                  if (currentIsTita) {
-                    setTitaDraft("");
-                  }
                   setAnswers((prev) => {
                     const n = { ...prev };
                     delete n[currentQ.id];
@@ -980,9 +897,6 @@ export default function SectionalTest({ user }: { user: any }) {
               </Button>
               <Button
                 onClick={() => {
-                  if (currentIsTita) {
-                    commitTitaAnswer(currentQ.id, titaDraft);
-                  }
                   if (currentIdx < questions.length - 1) {
                     goToIdx(currentIdx + 1);
                   } else {
@@ -1048,7 +962,7 @@ export default function SectionalTest({ user }: { user: any }) {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Marking</span>
-                  <span className="font-bold">+3 / –1 / 0</span>
+                  <span className="font-bold">No negative marking</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Flagged</span>
@@ -1064,7 +978,7 @@ export default function SectionalTest({ user }: { user: any }) {
 
   // ── RESULT VIEW ───────────────────────────────────────────────────────────────
   if (view === "result" && result && selectedTest) {
-    const meta = SECTION_META[selectedTest.section as keyof typeof SECTION_META];
+    const meta = SECTION_META[selectedTest.section as GmatSection];
     const questions = selectedTest.questions;
 
     if (reviewMode) {
@@ -1079,10 +993,7 @@ export default function SectionalTest({ user }: { user: any }) {
           <div className="space-y-4">
             {questions.map((q, idx) => {
               const studentAns = result.studentAnswers[q.id];
-              const qIsTita = isTitaQuestion(q);
-              const isCorrect = qIsTita
-                ? isTitaCorrect(studentAns, q.correctAnswer)
-                : studentAns === q.correctAnswer;
+              const isCorrect = studentAns === q.correctAnswer;
               const isSkipped = !studentAns;
            // Find the passage for this question if any
               const passage = q.passageId && selectedTest.passages
@@ -1102,23 +1013,20 @@ export default function SectionalTest({ user }: { user: any }) {
                   <CardHeader className="pb-2">
                     <div className="flex justify-between items-center">
                       <div className="flex gap-2">
-                        <Badge variant="outline">{q.section}</Badge>
+                        <Badge variant="outline">{SECTION_META[q.section]?.short ?? q.section}</Badge>
                         <Badge variant="outline" className="text-[10px]">{q.difficulty}</Badge>
-                        {qIsTita && (
-                          <Badge variant="outline" className="text-[10px] font-bold">TITA</Badge>
-                        )}
                       </div>
                       {isCorrect ? (
                         <span className="text-green-600 flex items-center gap-1 text-xs font-bold">
-                          <CheckCircle2 size={14} /> Correct (+3)
+                          <CheckCircle2 size={14} /> Correct
                         </span>
                       ) : isSkipped ? (
                         <span className="text-yellow-600 flex items-center gap-1 text-xs font-bold">
-                          <AlertCircle size={14} /> Skipped (0)
+                          <AlertCircle size={14} /> Skipped
                         </span>
                       ) : (
                         <span className="text-red-600 flex items-center gap-1 text-xs font-bold">
-                          <XCircle size={14} /> Wrong (–1)
+                          <XCircle size={14} /> Incorrect
                         </span>
                       )}
                     </div>
@@ -1129,43 +1037,22 @@ export default function SectionalTest({ user }: { user: any }) {
                     </p>
                   </CardHeader>
                   <CardContent className="space-y-3">
-                    {qIsTita ? (
-                      <div className="grid gap-1.5 sm:grid-cols-2">
-                        <div className="px-3 py-2 rounded-lg text-sm border bg-secondary/20 border-transparent">
-                          <p className="text-[10px] font-bold uppercase text-muted-foreground mb-0.5">
-                            Your answer
-                          </p>
-                          <p className={isSkipped ? "text-muted-foreground italic" : isCorrect ? "text-green-800 font-medium" : "text-red-800"}>
-                            {isSkipped ? "Not attempted" : <Latex>{studentAns}</Latex>}
-                          </p>
+                    <div className="grid gap-1.5">
+                      {q.options.map((opt) => (
+                        <div
+                          key={opt}
+                          className={`px-3 py-2 rounded-lg text-sm border ${
+                            opt === q.correctAnswer
+                              ? "bg-green-50 border-green-200 text-green-800 font-medium"
+                              : opt === studentAns
+                              ? "bg-red-50 border-red-200 text-red-800"
+                              : "bg-secondary/20 border-transparent"
+                          }`}
+                        >
+                         <Latex> {opt}</Latex>
                         </div>
-                        <div className="px-3 py-2 rounded-lg text-sm border bg-green-50 border-green-200">
-                          <p className="text-[10px] font-bold uppercase text-muted-foreground mb-0.5">
-                            Correct answer
-                          </p>
-                          <p className="text-green-800 font-medium">
-                            <Latex>{q.correctAnswer}</Latex>
-                          </p>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="grid gap-1.5">
-                        {q.options.map((opt) => (
-                          <div
-                            key={opt}
-                            className={`px-3 py-2 rounded-lg text-sm border ${
-                              opt === q.correctAnswer
-                                ? "bg-green-50 border-green-200 text-green-800 font-medium"
-                                : opt === studentAns
-                                ? "bg-red-50 border-red-200 text-red-800"
-                                : "bg-secondary/20 border-transparent"
-                            }`}
-                          >
-                           <Latex> {opt}</Latex>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                      ))}
+                    </div>
                     {q.explanation && (
                       <div className="bg-secondary/30 p-3 rounded-lg text-sm">
                         <p className="font-bold text-xs uppercase mb-1">Explanation</p>
@@ -1184,8 +1071,6 @@ export default function SectionalTest({ user }: { user: any }) {
     }
 
     // Summary screen
-    const rawMarks = result.correctAnswers * 3 - result.wrongAnswers;
-    const maxMarks = questions.length * 3;
     const attemptRate = Math.round(((result.correctAnswers + result.wrongAnswers) / questions.length) * 100);
 
     return (
@@ -1207,7 +1092,7 @@ export default function SectionalTest({ user }: { user: any }) {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
               {[
                 { label: "Scaled Score", val: result.scaledScore, color: meta.textColor, big: true },
-                { label: "Raw Marks", val: `${rawMarks}/${maxMarks}`, color: "text-foreground" },
+                { label: "Correct / Total", val: `${result.correctAnswers}/${questions.length}`, color: "text-foreground" },
                 { label: "Accuracy", val: `${result.totalScore}%`, color: "text-foreground" },
                 {
                   label: "Time Taken",
@@ -1230,19 +1115,17 @@ export default function SectionalTest({ user }: { user: any }) {
             <CheckCircle2 className="mx-auto text-green-500 mb-2" size={24} />
             <p className="text-3xl font-black text-green-600">{result.correctAnswers}</p>
             <p className="text-xs font-bold uppercase text-muted-foreground mt-1">Correct</p>
-            <p className="text-xs text-green-600 font-semibold mt-1">+{result.correctAnswers * 3} marks</p>
           </Card>
           <Card className="p-5 text-center border-t-4 border-t-red-500">
             <XCircle className="mx-auto text-red-500 mb-2" size={24} />
             <p className="text-3xl font-black text-red-600">{result.wrongAnswers}</p>
-            <p className="text-xs font-bold uppercase text-muted-foreground mt-1">Wrong</p>
-            <p className="text-xs text-red-600 font-semibold mt-1">–{result.wrongAnswers} marks</p>
+            <p className="text-xs font-bold uppercase text-muted-foreground mt-1">Incorrect</p>
+            <p className="text-xs text-muted-foreground font-semibold mt-1">No penalty</p>
           </Card>
           <Card className="p-5 text-center border-t-4 border-t-yellow-400">
             <AlertCircle className="mx-auto text-yellow-500 mb-2" size={24} />
             <p className="text-3xl font-black text-yellow-600">{result.skippedQuestions}</p>
             <p className="text-xs font-bold uppercase text-muted-foreground mt-1">Skipped</p>
-            <p className="text-xs text-muted-foreground font-semibold mt-1">0 marks</p>
           </Card>
         </div>
 
