@@ -456,24 +456,27 @@ function Dashboard({ user, setActiveTab }: { user: UserProfile, setActiveTab: (t
           </h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             {[
-              { label: "Daily Test", icon: ClipboardList, tab: "daily-test", color: "bg-orange-500" },
-              { label: "Courses", icon: BookOpen, tab: "courses", color: "bg-blue-500" },
-              { label: "Videos", icon: Video, tab: "videos", color: "bg-purple-500" },
-              { label: "Analytics", icon: BarChart3, tab: "analytics", color: "bg-green-500" },
-              { label: "History", icon: History, tab: "history", color: "bg-slate-500" },
-              { label: "Profile", icon: User, tab: "profile", color: "bg-pink-500" },
-            ].map((item) => (
-              <button
-                key={item.label}
-                onClick={() => setActiveTab(item.tab)}
-                className="group flex flex-col items-center justify-center p-6 bg-background rounded-2xl border shadow-sm hover:shadow-md hover:border-primary/50 transition-all"
-              >
-                <div className={`${item.color} p-3 rounded-xl text-white mb-3 group-hover:scale-110 transition-transform`}>
-                  <item.icon size={24} />
-                </div>
-                <span className="font-semibold text-sm">{item.label}</span>
-              </button>
-            ))}
+  { label: "Daily Tests", icon: ClipboardList, tab: "daily-test", color: "bg-orange-500", subtitle: "Recently Updated" },
+  { label: "Sectional Tests", icon: ClipboardList, tab: "sectional", color: "bg-pink-500", subtitle: "Recently Updated" },
+  { label: "Courses", icon: BookOpen, tab: "courses", color: "bg-blue-500" },
+  { label: "Videos", icon: Video, tab: "videos", color: "bg-purple-500" },
+  { label: "Analytics", icon: BarChart3, tab: "analytics", color: "bg-green-500" },
+  { label: "History", icon: History, tab: "history", color: "bg-slate-500" },
+].map((item) => (
+  <button
+    key={item.label}
+    onClick={() => setActiveTab(item.tab)}
+    className="group flex flex-col items-center justify-center p-6 bg-background rounded-2xl border shadow-sm hover:shadow-md hover:border-primary/50 transition-all"
+  >
+    <div className={`${item.color} p-3 rounded-xl text-white mb-3 group-hover:scale-110 transition-transform`}>
+      <item.icon size={24} />
+    </div>
+    <span className="font-semibold text-sm">{item.label}</span>
+    {item.subtitle && (
+      <span className="text-[11px] text-muted-foreground mt-1 text-center">{item.subtitle}</span>
+    )}
+  </button>
+))}
           </div>
         </div>
 
