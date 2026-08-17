@@ -798,6 +798,7 @@ function DailyTest({ user }: { user: UserProfile }) {
         method: "POST",
         body: JSON.stringify({
           testId: test.id,
+          testName: test.testName,
           totalScore,
           correctAnswers: correct,
           wrongAnswers: wrong,
@@ -848,7 +849,7 @@ function DailyTest({ user }: { user: UserProfile }) {
                       <Badge variant="secondary">Pending</Badge>
                     )}
                   </div>
-                  <CardTitle className="text-lg">Daily Practice Test</CardTitle>
+                  <CardTitle className="text-lg">{t.testName || "Daily Practice Test"}</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-muted-foreground mb-4">
@@ -895,7 +896,7 @@ function DailyTest({ user }: { user: UserProfile }) {
         </div>
         <header className="text-center space-y-2">
           <h1 className="text-3xl font-bold">Test Results</h1>
-          <p className="text-muted-foreground">Great job completing this practice set!</p>
+          <p className="text-muted-foreground">{test?.testName || "Daily Practice Test"}</p>
         </header>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -1108,7 +1109,7 @@ const handleReview = async (res: any) => {
         </div>
         <header className="text-center space-y-2">
           <h1 className="text-3xl font-bold">Test Results</h1>
-          <p className="text-muted-foreground">Review your past practice attempt!</p>
+          <p className="text-muted-foreground">{reviewingResult.testName || reviewingTest?.testName || "Review your past practice attempt!"}</p>
         </header>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -1194,7 +1195,7 @@ const handleReview = async (res: any) => {
                   <span className="text-[10px] opacity-80">%</span>
                 </div>
                 <div>
-                  <h3 className="font-bold text-lg">Daily Practice Test</h3>
+                  <h3 className="font-bold text-lg">{res.testName || "Daily Practice Test"}</h3>
                   <p className="text-sm text-muted-foreground">{new Date(res.testDate).toLocaleDateString()} • {Math.floor(res.timeSpent / 60)}m spent</p>
                 </div>
               </div>
@@ -1328,6 +1329,7 @@ function AdminDashboard({ user }: { user: UserProfile }) {
   const [approved, setApproved] = useState<any[]>([]);
   const [generating, setGenerating] = useState(false);
   const [publishing, setPublishing] = useState(false);
+ const [testName, setTestName] = useState(""); 
   const [activeTab, setActiveTab] = useState("queue");
   const [newMaterial, setNewMaterial] = useState({ topicName: "", section: "Quantitative", googleSheetLink: "", googleDriveLink: "", description: "" });
   const [newVideo, setNewVideo] = useState({ topicName: "", section: "Quantitative", googleSheetLink: "", googleDriveLink: "", duration: "", instructorName: "" });
@@ -1416,6 +1418,10 @@ const questions = await response.json();
   };
 
   const handlePublishTest = async () => {
+     if (!testName.trim()) {
+    toast.error("Please enter a name for this test.");
+    return;
+  }
     if (approved.length < 20) {
       toast.error(`Need at least 20 approved questions. You have ${approved.length}.`);
       return;
@@ -1430,6 +1436,7 @@ const questions = await response.json();
       await apiRequest("/daily-test/publish", {
         method: "POST",
         body: JSON.stringify({
+             testName,
           testDate: today,
           questionIds: selectedIds
         })
@@ -1451,6 +1458,12 @@ const questions = await response.json();
           <p className="text-muted-foreground">Manage questions, students, and system settings.</p>
         </div>
         <div className="flex gap-2">
+         <Input
+    placeholder="Test name (e.g. Daily Sprint #12)"
+    value={testName}
+    onChange={(e) => setTestName(e.target.value)}
+    className="w-56"
+  />
           <Button variant="outline" onClick={handlePublishTest} disabled={publishing || approved.length < 20} className="gap-2 h-11 px-6">
             <CheckCircle2 size={20} className="text-green-500" />
             {publishing ? "Publishing..." : "Publish Today's Test"}
