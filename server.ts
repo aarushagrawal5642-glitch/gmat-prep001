@@ -63,8 +63,8 @@ const SHEET_CONFIG: Record<string, string[]> = {
   VideoLectures: ["id", "topicName", "section", "googleSheetLink", "googleDriveLink", "duration", "instructorName", "dateUploaded"],
   UnverifiedQuestions: ["id", "section", "questionText", "options", "correctAnswer", "explanation", "difficulty"],
   ApprovedQuestions: ["id", "section", "questionText", "options", "correctAnswer", "explanation", "difficulty", "approvedDate"],
-  DailyTests: ["id", "testDate", "questionIds"],
-  TestResults: ["id", "studentId", "testDate", "testId", "totalScore", "correctAnswers", "wrongAnswers", "skippedQuestions", "timeSpent", "sectionScores", "studentAnswers"],
+  DailyTests: ["id", "testName", "testDate", "questionIds"],
+  TestResults: ["id", "studentId", "testDate", "testId", "testName", "totalScore", "correctAnswers", "wrongAnswers", "skippedQuestions", "timeSpent", "sectionScores", "studentAnswers"],
   SectionalTests: ["id", "name", "section", "durationMinutes", "questionIds", "passageIds", "targetExam", "publishedDate"],
   SectionalQuestions: ["id", "section", "questionText", "questionType", "options", "correctAnswer", "answerTolerance", "explanation", "difficulty", "passageId", "targetExam"],
   SectionalPassages: ["id", "title", "text", "targetExam"],
@@ -511,12 +511,12 @@ async function startServer() {
     if (req.user.role !== "admin") return res.sendStatus(403);
     const { testDate, questionIds } = req.body; // testDate format: YYYY-MM-DD
 
-    if (!testDate || !questionIds || !Array.isArray(questionIds) || questionIds.length === 0) {
+    if (!testName || !testDate || !questionIds || !Array.isArray(questionIds) || questionIds.length === 0) {
       return res.status(400).json({ message: "Invalid test data" });
     }
 
     const testId = `DT${Date.now()}`;
-    const newTest = { id: testId, testDate, questionIds };
+    const newTest = { id: testId, testName, testDate, questionIds };
 
     await appendSheetData("DailyTests", newTest);
 
