@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import "katex/dist/katex.min.css";
 import Latex from "react-latex-next";
 import {
@@ -15,6 +15,8 @@ import {
   Eye,
   ZoomIn,
   X,
+  ListChecks,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -66,12 +68,17 @@ interface SectionalResult {
   timeSpent: number;
   studentAnswers: Record<string, string>;
   scaledScore: number; // GMAT-style scaled score, 60–90
+  editsUsed?: number; // how many of the 3 allowed answer changes were used
+  reachedReview?: boolean; // whether the student reached the Review & Edit screen
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-// GMAT Focus Edition: 3 sections, 45 minutes each, no negative marking.
-// (Actual GMAT scoring is computer-adaptive; scaledScore here is an
-// approximation for practice purposes, mapped from raw accuracy.)
+// GMAT Focus Edition: 3 sections, 45 minutes each, no negative marking,
+// strictly sequential (no skipping), one Question Review & Edit screen per
+// section that allows up to 3 answer changes — this mirrors the real exam's
+// rules as documented by GMAC / mba.com.
+
+const MAX_EDITS_PER_SECTION = 3;
 
 const SECTION_META: Record<
   GmatSection,
@@ -121,9 +128,6 @@ const SECTION_META: Record<
 const SECTION_ORDER: GmatSection[] = ["Quant", "Verbal", "DataInsights"];
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
-// Renders text with \n\n-separated paragraphs as separate <p> blocks,
-// same behaviour as the passage renderer, but each paragraph still
-// supports LaTeX.
 function MultiParagraphLatex({ text, className }: { text: string; className?: string }) {
   if (!text) return null;
   const paras = text.split("\n\n");
@@ -143,9 +147,11 @@ function formatTime(seconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-// GMAT-style scaled score approximation: no negative marking, so this is
-// purely a function of accuracy, mapped onto the real GMAT section band
-// of 60–90.
+// GMAT Focus section scores are reported on a 60–90 scale in 1-point
+// increments. GMAC's real item-adaptive algorithm is proprietary and can't
+// be reproduced outside the live exam, so — same as every third-party GMAT
+// prep tool — this maps raw accuracy onto that 60–90 band as a practice
+// approximation (no negative marking, so it is purely accuracy-driven).
 function calcScaledScore(correct: number, total: number) {
   if (total === 0) return 60;
   const accuracy = correct / total;
@@ -158,22 +164,11 @@ type PassageSegment =
   | { type: "text"; content: string }
   | { type: "image"; url: string; alt?: string };
 
-/**
- * Parses a passage text string into an array of text and image segments.
- * Handles:
- *   - Bare image URLs:  https://example.com/chart.png
- *   - Markdown images:  ![alt text](https://example.com/chart.png)
- *   - Tagged images:    [image: https://example.com/chart.png]
- *
- * Used for Verbal RC passages as well as Data Insights stimuli
- * (Multi-Source Reasoning tabs, Table Analysis, Graphics Interpretation).
- */
 function parsePassageSegments(text: string): PassageSegment[] {
   const normalized = text.replace(/\\n/g, "\n");
   const segments: PassageSegment[] = [];
   let lastIndex = 0;
 
-  // Reset regex state
   IMAGE_URL_REGEX.lastIndex = 0;
 
   let match: RegExpExecArray | null;
@@ -182,7 +177,6 @@ function parsePassageSegments(text: string): PassageSegment[] {
     const url = mdUrl || tagUrl || bareUrl;
     const alt = mdAlt || undefined;
 
-    // Push any text before this match
     if (match.index > lastIndex) {
       segments.push({ type: "text", content: normalized.slice(lastIndex, match.index) });
     }
@@ -191,7 +185,6 @@ function parsePassageSegments(text: string): PassageSegment[] {
     lastIndex = match.index + fullMatch.length;
   }
 
-  // Push remaining text
   if (lastIndex < normalized.length) {
     segments.push({ type: "text", content: normalized.slice(lastIndex) });
   }
@@ -246,7 +239,6 @@ function PassageImage({ url, alt }: { url: string; alt?: string }) {
         )}
       </div>
 
-      {/* Lightbox */}
       {lightbox && (
         <div
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
@@ -281,7 +273,6 @@ function PassageContent({ text }: { text: string }) {
         if (seg.type === "image") {
           return <PassageImage key={i} url={seg.url} alt={seg.alt} />;
         }
-        // Split text segment into paragraphs
         return (
           <div key={i}>
             {seg.content
@@ -297,7 +288,8 @@ function PassageContent({ text }: { text: string }) {
     </div>
   );
 }
-// ─── Question Status Dot ──────────────────────────────────────────────────────
+
+// ─── Question Status Dot (used on the Review & Edit palette) ─────────────────
 
 function StatusDot({
   answered,
@@ -331,13 +323,15 @@ function StatusDot({
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function sectionalTest({ user }: { user: any }) {
-  const [view, setView] = useState<"list" | "instructions" | "test" | "result">("list");
+  const [view, setView] = useState<
+    "list" | "instructions" | "test" | "reviewEdit" | "result"
+  >("list");
   const [availableTests, setAvailableTests] = useState<SectionalTest[]>([]);
   const [attempts, setAttempts] = useState<Record<string, SectionalResult>>({});
   const [selectedTest, setSelectedTest] = useState<SectionalTest | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Test state
+  // Test state — strictly sequential, one question visible at a time
   const [currentIdx, setCurrentIdx] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [flagged, setFlagged] = useState<Set<string>>(new Set());
@@ -345,8 +339,13 @@ export default function sectionalTest({ user }: { user: any }) {
   const [submitted, setSubmitted] = useState(false);
   const [result, setResult] = useState<SectionalResult | null>(null);
   const [activePassage, setActivePassage] = useState<Passage | null>(null);
-  const [reviewMode, setReviewMode] = useState(false);
+  const [reviewMode, setReviewMode] = useState(false); // post-submission full review with explanations
   const [testLoading, setTestLoading] = useState(false);
+
+  // Question Review & Edit (mid-section, pre-submission) state
+  const [reviewIdx, setReviewIdx] = useState(0);
+  const [editsUsed, setEditsUsed] = useState(0);
+  const reachedReviewRef = useRef(false); // did the student legitimately reach the review screen?
 
   // ── Load tests ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -373,28 +372,27 @@ export default function sectionalTest({ user }: { user: any }) {
     }
   };
 
-  // ── Timer ───────────────────────────────────────────────────────────────────
+  // ── Timer (runs through both the sequential test AND the review/edit screen) ─
   useEffect(() => {
-    if (view !== "test" || submitted || timeLeft <= 0) return;
-    if (timeLeft === 0) {
-      handleSubmit();
-      return;
-    }
+    if ((view !== "test" && view !== "reviewEdit") || submitted || timeLeft <= 0) return;
     const t = setInterval(() => setTimeLeft((p) => p - 1), 1000);
     return () => clearInterval(t);
   }, [view, submitted, timeLeft]);
 
-  // Auto-submit when time hits 0
+  // Auto-submit when time hits 0, from either phase.
+  // If time expires during the sequential phase, the Review & Edit screen is
+  // skipped entirely — this matches the real GMAT Focus Edition behavior.
   useEffect(() => {
-    if (view === "test" && !submitted && timeLeft === 0) {
+    if ((view === "test" || view === "reviewEdit") && !submitted && timeLeft === 0) {
       handleSubmit();
     }
   }, [timeLeft]);
 
-  // ── Passage for current question ─────────────────────────────────────────
+  // ── Passage for the question currently on screen (test or review phase) ────
+  const displayedIdx = view === "reviewEdit" ? reviewIdx : currentIdx;
   useEffect(() => {
-    if (!selectedTest || view !== "test") return;
-    const q = selectedTest.questions[currentIdx];
+    if (!selectedTest || (view !== "test" && view !== "reviewEdit")) return;
+    const q = selectedTest.questions[displayedIdx];
     if (q?.passageId && selectedTest.passages) {
       setActivePassage(
         selectedTest.passages.find((p) => p.id === q.passageId) || null
@@ -402,11 +400,10 @@ export default function sectionalTest({ user }: { user: any }) {
     } else {
       setActivePassage(null);
     }
-  }, [currentIdx, selectedTest, view]);
+  }, [displayedIdx, selectedTest, view]);
 
   // ── Actions ──────────────────────────────────────────────────────────────
   const startTest = async (test: SectionalTest) => {
-    // If already attempted, fetch full test for review then show result
     if (attempts[test.id]) {
       setTestLoading(true);
       try {
@@ -423,7 +420,6 @@ export default function sectionalTest({ user }: { user: any }) {
       return;
     }
 
-    // Fetch full test (with all questions) before showing instructions
     setTestLoading(true);
     try {
       const fullTest = await apiRequest(`/sectional-test/${test.id}`);
@@ -448,8 +444,11 @@ export default function sectionalTest({ user }: { user: any }) {
       return;
     }
     setCurrentIdx(0);
+    setReviewIdx(0);
     setAnswers({});
     setFlagged(new Set());
+    setEditsUsed(0);
+    reachedReviewRef.current = false;
     setTimeLeft((selectedTest.durationMinutes || 45) * 60);
     setSubmitted(false);
     setResult(null);
@@ -467,6 +466,47 @@ export default function sectionalTest({ user }: { user: any }) {
     },
     []
   );
+
+  // Answering the current question during the sequential phase — free to
+  // change your mind on THIS question as many times as you like, since it
+  // hasn't been "locked" (passed) yet. No edit is consumed here.
+  const selectAnswer = (qId: string, val: string) => {
+    setAnswers((prev) => ({ ...prev, [qId]: val }));
+  };
+
+  // Advancing past a question locks it in. Changing it later (on the Review
+  // & Edit screen) will consume one of the 3 allowed edits.
+  const goNext = () => {
+    if (!selectedTest) return;
+    const questions = selectedTest.questions;
+    const currentQ = questions[currentIdx];
+    if (!answers[currentQ.id]) {
+      toast.error("You must select an answer before moving to the next question.");
+      return;
+    }
+    if (currentIdx < questions.length - 1) {
+      setCurrentIdx((i) => i + 1);
+    } else {
+      // Final question answered in time — go to Question Review & Edit.
+      reachedReviewRef.current = true;
+      setReviewIdx(0);
+      setView("reviewEdit");
+    }
+  };
+
+  // Changing an answer on the Review & Edit screen. Only counts as an edit
+  // if the value actually changes; capped at MAX_EDITS_PER_SECTION for the
+  // whole section (not per question — two edits on one question use two of
+  // the three edits).
+  const editAnswer = (qId: string, val: string) => {
+    if (answers[qId] === val) return; // re-selecting the same answer is not an edit
+    if (editsUsed >= MAX_EDITS_PER_SECTION) {
+      toast.error("You've used all 3 answer changes allowed for this section.");
+      return;
+    }
+    setAnswers((prev) => ({ ...prev, [qId]: val }));
+    setEditsUsed((e) => e + 1);
+  };
 
   const handleSubmit = useCallback(async () => {
     if (!selectedTest || submitted) return;
@@ -503,6 +543,8 @@ export default function sectionalTest({ user }: { user: any }) {
       timeSpent,
       studentAnswers: answers,
       scaledScore,
+      editsUsed,
+      reachedReview: reachedReviewRef.current,
     };
 
     try {
@@ -519,7 +561,7 @@ export default function sectionalTest({ user }: { user: any }) {
       setResult(payload);
       setView("result");
     }
-  }, [selectedTest, submitted, answers, timeLeft]);
+  }, [selectedTest, submitted, answers, timeLeft, editsUsed]);
 
   // ─── VIEWS ──────────────────────────────────────────────────────────────────
 
@@ -547,7 +589,6 @@ export default function sectionalTest({ user }: { user: any }) {
           </p>
         </header>
 
-        {/* GMAT Pattern Info */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {SECTION_ORDER.map((sec) => {
             const meta = SECTION_META[sec];
@@ -695,7 +736,6 @@ export default function sectionalTest({ user }: { user: any }) {
             <CardTitle className="text-2xl">{selectedTest.name}</CardTitle>
           </CardHeader>
           <CardContent className="pt-6 space-y-6">
-            {/* Stats */}
             <div className="grid grid-cols-3 gap-4 text-center">
               {[
                 ["Questions", selectedTest.questions?.length],
@@ -709,16 +749,16 @@ export default function sectionalTest({ user }: { user: any }) {
               ))}
             </div>
 
-            {/* Rules */}
             <div className="space-y-3">
               <h3 className="font-bold text-sm uppercase tracking-wide text-muted-foreground">Instructions</h3>
               {[
-                "This is a timed section test. The timer starts when you click Begin.",
-                "There is no negative marking on the GMAT — an incorrect answer costs you nothing beyond the question itself. Skipping still counts as unanswered.",
-                "Your scaled score (60–90) is estimated from your accuracy on this section, as an approximation of GMAT Focus Edition scoring.",
-                "You can navigate between questions freely and flag any question for later review.",
-                "Once time is up, the section auto-submits. You can also submit early.",
-                "Answers cannot be changed after submission.",
+                "This is a timed section test. The timer starts the moment you click Begin, and keeps running through the review screen described below.",
+                "Questions appear one at a time and you cannot skip ahead. You must select an answer before the Next button unlocks.",
+                "There is no negative marking — an incorrect answer costs you nothing beyond the question itself. But an unanswered question is not allowed; you cannot leave one blank to look at a later question.",
+                "While moving forward, you can bookmark (flag) any question, as many as you like, to find it quickly later.",
+                "If you answer the final question with time still on the clock, you'll reach the Question Review & Edit screen. There you can open any question in the section — but you may change at most 3 answers in total for the whole section (changing the same question twice counts as two of your three edits).",
+                "If the timer hits zero before you finish answering every question, the section submits immediately with whatever you've answered so far, and the Review & Edit screen will not appear.",
+                "Once you submit the section — manually or because time ran out — your answers are final and cannot be changed.",
               ].map((rule, i) => (
                 <div key={i} className="flex gap-3 text-sm">
                   <span className={`w-5 h-5 shrink-0 rounded-full ${meta.color} text-white flex items-center justify-center text-[10px] font-bold mt-0.5`}>
@@ -738,7 +778,7 @@ export default function sectionalTest({ user }: { user: any }) {
     );
   }
 
-  // ── TEST VIEW ────────────────────────────────────────────────────────────────
+  // ── SEQUENTIAL TEST VIEW (one question, no skipping, no going back) ─────────
   if (view === "test" && selectedTest) {
     const questions = selectedTest.questions || [];
     if (!questions.length) {
@@ -754,16 +794,14 @@ export default function sectionalTest({ user }: { user: any }) {
     const meta = SECTION_META[selectedTest.section];
     const answeredCount = Object.keys(answers).length;
     const progress = (answeredCount / questions.length) * 100;
-
-    const goToIdx = (newIdx: number) => {
-      setCurrentIdx(newIdx);
-    };
+    const isLast = currentIdx === questions.length - 1;
+    const isAnswered = !!answers[currentQ.id];
 
     return (
       <div className="flex flex-col h-full min-h-screen">
         {/* Sticky Header */}
         <div className="sticky top-0 z-20 bg-background/95 backdrop-blur border-b shadow-sm">
-          <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+          <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <Badge className={`${meta.color} text-white border-none`}>{meta.short}</Badge>
               <span className="text-sm font-medium hidden sm:block truncate max-w-[200px]">
@@ -772,7 +810,154 @@ export default function sectionalTest({ user }: { user: any }) {
             </div>
             <div className="flex items-center gap-4">
               <div className="hidden sm:flex items-center gap-2 text-xs text-muted-foreground">
-                <span className="font-bold text-foreground">{answeredCount}</span> / {questions.length} answered
+                <span className="font-bold text-foreground">{currentIdx + 1}</span> / {questions.length}
+              </div>
+              <div
+                className={`flex items-center gap-2 font-mono font-bold text-sm px-3 py-1.5 rounded-lg ${
+                  timeLeft < 300
+                    ? "bg-red-100 text-red-600 animate-pulse"
+                    : "bg-secondary text-foreground"
+                }`}
+              >
+                <Clock size={14} />
+                {formatTime(timeLeft)}
+              </div>
+            </div>
+          </div>
+          <Progress value={progress} className="h-1 rounded-none" />
+        </div>
+
+        {/* Single-question column — no palette, no jumping around */}
+        <div className="flex-1 max-w-3xl mx-auto w-full px-4 py-6 space-y-4">
+          {activePassage && (
+            <Card className="border-l-4 border-l-violet-400">
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase text-muted-foreground tracking-wide">
+                    {selectedTest.section === "DataInsights" ? "Stimulus" : "Reading Passage"} · {activePassage.title}
+                  </span>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="text-sm leading-relaxed text-muted-foreground max-h-56 overflow-y-auto pr-2">
+                  <PassageContent text={activePassage.text} />
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <Card className="shadow-md">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded ${meta.lightColor} ${meta.textColor}`}>
+                    Q {currentIdx + 1} / {questions.length}
+                  </span>
+                  {!isAnswered && (
+                    <span className="text-[10px] font-bold text-orange-500 flex items-center gap-1">
+                      <AlertCircle size={12} /> Select an answer to continue
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => toggleFlag(currentQ.id)}
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    flagged.has(currentQ.id)
+                      ? "text-orange-500 bg-orange-50"
+                      : "text-muted-foreground hover:bg-secondary"
+                  }`}
+                  title="Bookmark for review"
+                >
+                  <Flag size={16} fill={flagged.has(currentQ.id) ? "currentColor" : "none"} />
+                </button>
+              </div>
+              <p className="text-base font-semibold leading-relaxed mt-3">
+                <MultiParagraphLatex text={currentQ.questionText} />
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <RadioGroup
+                value={answers[currentQ.id] || ""}
+                onValueChange={(val) => selectAnswer(currentQ.id, val)}
+              >
+                {(Array.isArray(currentQ.options) ? currentQ.options : []).filter(Boolean).map((opt, idx) => (
+                  <Label
+                    key={opt}
+                    className={`flex items-center gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
+                      answers[currentQ.id] === opt
+                        ? `border-primary bg-blue-50 ring-1 ring-primary`
+                        : "border-border hover:border-primary/30 hover:bg-secondary/30"
+                    }`}
+                  >
+                    <RadioGroupItem value={opt} id={`opt-${idx}`} className="sr-only" />
+                    <div
+                      className={`w-7 h-7 shrink-0 rounded-lg flex items-center justify-center font-bold text-xs border ${
+                        answers[currentQ.id] === opt
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-secondary text-muted-foreground border-border"
+                      }`}
+                    >
+                      {String.fromCharCode(65 + idx)}
+                    </div>
+                    <span className="text-sm"><Latex>{opt}</Latex></span>
+                  </Label>
+                ))}
+              </RadioGroup>
+            </CardContent>
+          </Card>
+
+          {/* Forward-only navigation — no Previous, no Clear (can't leave blank) */}
+          <div className="flex justify-end items-center">
+            <Button
+              onClick={goNext}
+              disabled={!isAnswered}
+              className="gap-1"
+              size="lg"
+            >
+              {isLast ? (
+                <>Answer & Continue to Review <ChevronRight size={16} /></>
+              ) : (
+                <>Next Question <ChevronRight size={16} /></>
+              )}
+            </Button>
+          </div>
+          <p className="text-center text-xs text-muted-foreground">
+            You can bookmark this question, but you cannot skip it or come back to it until the Review & Edit screen.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── QUESTION REVIEW & EDIT VIEW (post-final-question, pre-submission) ───────
+  if (view === "reviewEdit" && selectedTest) {
+    const questions = selectedTest.questions;
+    const meta = SECTION_META[selectedTest.section];
+    const reviewQ = questions[reviewIdx];
+    if (!reviewQ) return null;
+    const editsLeft = MAX_EDITS_PER_SECTION - editsUsed;
+    const answeredCount = Object.keys(answers).length;
+
+    return (
+      <div className="flex flex-col h-full min-h-screen">
+        <div className="sticky top-0 z-20 bg-background/95 backdrop-blur border-b shadow-sm">
+          <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Badge className={`${meta.color} text-white border-none`}>{meta.short}</Badge>
+              <span className="text-sm font-bold flex items-center gap-1">
+                <ListChecks size={14} /> Question Review &amp; Edit
+              </span>
+            </div>
+            <div className="flex items-center gap-4">
+              <div
+                className={`hidden sm:flex items-center gap-2 text-xs font-bold px-2.5 py-1 rounded-lg ${
+                  editsLeft === 0
+                    ? "bg-red-100 text-red-600"
+                    : "bg-secondary text-foreground"
+                }`}
+              >
+                {editsLeft === 0 ? <Lock size={12} /> : null}
+                {editsLeft} of {MAX_EDITS_PER_SECTION} edits left
               </div>
               <div
                 className={`flex items-center gap-2 font-mono font-bold text-sm px-3 py-1.5 rounded-lg ${
@@ -785,140 +970,133 @@ export default function sectionalTest({ user }: { user: any }) {
                 {formatTime(timeLeft)}
               </div>
               <Button size="sm" variant="destructive" onClick={handleSubmit}>
-                Submit
+                Submit Section
               </Button>
             </div>
           </div>
-          <Progress value={progress} className="h-1 rounded-none" />
         </div>
 
-        {/* Main layout */}
         <div className="flex-1 max-w-6xl mx-auto w-full px-4 py-6 grid grid-cols-1 lg:grid-cols-[1fr_260px] gap-6">
-          {/* Left: Passage + Question */}
+          {/* Left: viewable/editable question */}
           <div className="space-y-4">
-            {/* Passage panel */}
+            <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800">
+              You can open any question below. Selecting a different answer than the one you originally locked in uses one of your <strong>{MAX_EDITS_PER_SECTION} edits</strong> for this section — viewing a question never does.
+            </div>
+
             {activePassage && (
               <Card className="border-l-4 border-l-violet-400">
                 <CardHeader className="pb-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold uppercase text-muted-foreground tracking-wide">
-                      {selectedTest.section === "DataInsights" ? "Stimulus" : "Reading Passage"} · {activePassage.title}
-                    </span>
-                  </div>
+                  <span className="text-xs font-bold uppercase text-muted-foreground tracking-wide">
+                    {selectedTest.section === "DataInsights" ? "Stimulus" : "Reading Passage"} · {activePassage.title}
+                  </span>
                 </CardHeader>
                 <CardContent>
-    <div className="text-sm leading-relaxed text-muted-foreground max-h-56 overflow-y-auto pr-2">
+                  <div className="text-sm leading-relaxed text-muted-foreground max-h-56 overflow-y-auto pr-2">
                     <PassageContent text={activePassage.text} />
                   </div>
                 </CardContent>
               </Card>
             )}
 
-            {/* Question Card */}
             <Card className="shadow-md">
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${meta.lightColor} ${meta.textColor}`}>
-                      Q {currentIdx + 1} / {questions.length}
-                    </span>
-                  </div>
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded ${meta.lightColor} ${meta.textColor}`}>
+                    Q {reviewIdx + 1} / {questions.length}
+                  </span>
                   <button
-                    onClick={() => toggleFlag(currentQ.id)}
+                    onClick={() => toggleFlag(reviewQ.id)}
                     className={`p-1.5 rounded-lg transition-colors ${
-                      flagged.has(currentQ.id)
+                      flagged.has(reviewQ.id)
                         ? "text-orange-500 bg-orange-50"
                         : "text-muted-foreground hover:bg-secondary"
                     }`}
-                    title="Flag for review"
+                    title="Bookmark"
                   >
-                    <Flag size={16} />
+                    <Flag size={16} fill={flagged.has(reviewQ.id) ? "currentColor" : "none"} />
                   </button>
                 </div>
                 <p className="text-base font-semibold leading-relaxed mt-3">
- <MultiParagraphLatex text={currentQ.questionText} />
-</p>
+                  <MultiParagraphLatex text={reviewQ.questionText} />
+                </p>
               </CardHeader>
               <CardContent className="space-y-2">
                 <RadioGroup
-                  value={answers[currentQ.id] || ""}
-                  onValueChange={(val) =>
-                    setAnswers((prev) => ({ ...prev, [currentQ.id]: val }))
-                  }
+                  value={answers[reviewQ.id] || ""}
+                  onValueChange={(val) => editAnswer(reviewQ.id, val)}
                 >
-                  {(Array.isArray(currentQ.options) ? currentQ.options : []).filter(Boolean).map((opt, idx) => (
-                    <Label
-                      key={opt}
-                      className={`flex items-center gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
-                        answers[currentQ.id] === opt
-                          ? `border-primary bg-blue-50 ring-1 ring-primary`
-                          : "border-border hover:border-primary/30 hover:bg-secondary/30"
-                      }`}
-                    >
-                      <RadioGroupItem value={opt} id={`opt-${idx}`} className="sr-only" />
-                      <div
-                        className={`w-7 h-7 shrink-0 rounded-lg flex items-center justify-center font-bold text-xs border ${
-                          answers[currentQ.id] === opt
-                            ? "bg-primary text-primary-foreground border-primary"
-                            : "bg-secondary text-muted-foreground border-border"
+                  {(Array.isArray(reviewQ.options) ? reviewQ.options : []).filter(Boolean).map((opt, idx) => {
+                    const isSelected = answers[reviewQ.id] === opt;
+                    const blockedByEditCap = editsLeft === 0 && !isSelected;
+                    return (
+                      <Label
+                        key={opt}
+                        className={`flex items-center gap-3 p-3.5 rounded-xl border-2 transition-all ${
+                          blockedByEditCap ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                        } ${
+                          isSelected
+                            ? "border-primary bg-blue-50 ring-1 ring-primary"
+                            : "border-border hover:border-primary/30 hover:bg-secondary/30"
                         }`}
                       >
-                        {String.fromCharCode(65 + idx)}
-                      </div>
-                      <span className="text-sm"><Latex>{opt}</Latex></span>
-                    </Label>
-                  ))}
+                        <RadioGroupItem
+                          value={opt}
+                          id={`ropt-${idx}`}
+                          className="sr-only"
+                          disabled={blockedByEditCap}
+                        />
+                        <div
+                          className={`w-7 h-7 shrink-0 rounded-lg flex items-center justify-center font-bold text-xs border ${
+                            isSelected
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-secondary text-muted-foreground border-border"
+                          }`}
+                        >
+                          {String.fromCharCode(65 + idx)}
+                        </div>
+                        <span className="text-sm"><Latex>{opt}</Latex></span>
+                      </Label>
+                    );
+                  })}
                 </RadioGroup>
+                {editsLeft === 0 && (
+                  <p className="text-xs text-red-600 flex items-center gap-1 mt-2">
+                    <Lock size={12} /> You've used all {MAX_EDITS_PER_SECTION} answer changes for this section — this question's answer is now locked.
+                  </p>
+                )}
               </CardContent>
             </Card>
 
-            {/* Navigation */}
             <div className="flex justify-between items-center">
               <Button
                 variant="outline"
-                onClick={() => goToIdx(Math.max(0, currentIdx - 1))}
-                disabled={currentIdx === 0}
+                onClick={() => setReviewIdx((i) => Math.max(0, i - 1))}
+                disabled={reviewIdx === 0}
                 className="gap-1"
               >
                 <ChevronLeft size={16} /> Previous
               </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setAnswers((prev) => {
-                    const n = { ...prev };
-                    delete n[currentQ.id];
-                    return n;
-                  });
-                }}
-                className="text-muted-foreground"
-              >
-                Clear
-              </Button>
-              <Button
-                onClick={() => {
-                  if (currentIdx < questions.length - 1) {
-                    goToIdx(currentIdx + 1);
-                  } else {
-                    handleSubmit();
-                  }
-                }}
-                className="gap-1"
-              >
-                {currentIdx < questions.length - 1 ? (
-                  <>Next <ChevronRight size={16} /></>
-                ) : (
-                  "Finish & Submit"
-                )}
-              </Button>
+              {reviewIdx < questions.length - 1 ? (
+                <Button
+                  variant="outline"
+                  onClick={() => setReviewIdx((i) => Math.min(questions.length - 1, i + 1))}
+                  className="gap-1"
+                >
+                  Next <ChevronRight size={16} />
+                </Button>
+              ) : (
+                <Button variant="destructive" onClick={handleSubmit}>
+                  Submit Section
+                </Button>
+              )}
             </div>
           </div>
 
-          {/* Right: Question palette */}
-          <div className="lg:sticky lg:top-[72px] self-start space-y-4">
+          {/* Right: full palette — free navigation, no restriction */}
+          <div className="lg:sticky lg:top-[88px] self-start space-y-4">
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-sm">Question Palette</CardTitle>
+                <CardTitle className="text-sm">All Questions</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-5 gap-1.5 mb-4">
@@ -928,48 +1106,44 @@ export default function sectionalTest({ user }: { user: any }) {
                       idx={idx}
                       answered={!!answers[q.id]}
                       flagged={flagged.has(q.id)}
-                      current={idx === currentIdx}
-                      onClick={() => goToIdx(idx)}
+                      current={idx === reviewIdx}
+                      onClick={() => setReviewIdx(idx)}
                     />
                   ))}
                 </div>
-                {/* Legend */}
                 <div className="space-y-1.5 text-xs text-muted-foreground border-t pt-3">
                   <div className="flex items-center gap-2">
                     <div className="w-4 h-4 rounded bg-blue-500" />
                     Answered ({answeredCount})
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-4 h-4 rounded bg-secondary border" />
-                    Not answered ({questions.length - answeredCount})
-                  </div>
                   <div className="flex items-center gap-2 relative">
                     <div className="w-4 h-4 rounded bg-secondary border relative">
                       <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-orange-400 rounded-full" />
                     </div>
-                    Flagged ({flagged.size})
+                    Bookmarked ({flagged.size})
                   </div>
                 </div>
               </CardContent>
             </Card>
 
-            {/* Section summary */}
             <Card className={`border ${meta.borderColor}`}>
               <CardContent className="pt-4 space-y-2 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Section</span>
-                  <span className={`font-bold ${meta.textColor}`}>{meta.short}</span>
+                  <span className="text-muted-foreground">Edits remaining</span>
+                  <span className={`font-bold ${editsLeft === 0 ? "text-red-600" : meta.textColor}`}>
+                    {editsLeft} / {MAX_EDITS_PER_SECTION}
+                  </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Marking</span>
-                  <span className="font-bold">No negative marking</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Flagged</span>
+                  <span className="text-muted-foreground">Bookmarked</span>
                   <span className="font-bold text-orange-500">{flagged.size}</span>
                 </div>
               </CardContent>
             </Card>
+
+            <Button className="w-full gap-2" size="lg" variant="destructive" onClick={handleSubmit}>
+              Submit Section
+            </Button>
           </div>
         </div>
       </div>
@@ -995,7 +1169,6 @@ export default function sectionalTest({ user }: { user: any }) {
               const studentAns = result.studentAnswers[q.id];
               const isCorrect = studentAns === q.correctAnswer;
               const isSkipped = !studentAns;
-           // Find the passage for this question if any
               const passage = q.passageId && selectedTest.passages
                 ? selectedTest.passages.find((p) => p.id === q.passageId)
                 : null;
@@ -1031,9 +1204,8 @@ export default function sectionalTest({ user }: { user: any }) {
                       )}
                     </div>
                     <p className="font-semibold text-sm mt-2">
-                    <span>Q{idx + 1}. </span>
-  <MultiParagraphLatex text={q.questionText} />
-
+                      <span>Q{idx + 1}. </span>
+                      <MultiParagraphLatex text={q.questionText} />
                     </p>
                   </CardHeader>
                   <CardContent className="space-y-3">
@@ -1049,16 +1221,16 @@ export default function sectionalTest({ user }: { user: any }) {
                               : "bg-secondary/20 border-transparent"
                           }`}
                         >
-                         <Latex> {opt}</Latex>
+                          <Latex> {opt}</Latex>
                         </div>
                       ))}
                     </div>
                     {q.explanation && (
                       <div className="bg-secondary/30 p-3 rounded-lg text-sm">
                         <p className="font-bold text-xs uppercase mb-1">Explanation</p>
-                       <div className="text-muted-foreground">
-  <MultiParagraphLatex text={q.explanation} />
-</div>
+                        <div className="text-muted-foreground">
+                          <MultiParagraphLatex text={q.explanation} />
+                        </div>
                       </div>
                     )}
                   </CardContent>
@@ -1070,19 +1242,16 @@ export default function sectionalTest({ user }: { user: any }) {
       );
     }
 
-    // Summary screen
     const attemptRate = Math.round(((result.correctAnswers + result.wrongAnswers) / questions.length) * 100);
 
     return (
       <div className="max-w-3xl mx-auto space-y-8">
-        {/* Header */}
         <div className="flex items-center gap-3">
           <Button variant="ghost" onClick={() => setView("list")} className="gap-1">
             <ArrowLeft size={16} /> All Tests
           </Button>
         </div>
 
-        {/* Score hero */}
         <Card className={`border-2 ${meta.borderColor} overflow-hidden`}>
           <div className={`${meta.color} px-6 py-5 text-white`}>
             <p className="text-sm font-bold uppercase tracking-widest opacity-80">{meta.label}</p>
@@ -1091,7 +1260,7 @@ export default function sectionalTest({ user }: { user: any }) {
           <CardContent className="pt-6">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
               {[
-                { label: "Scaled Score", val: result.scaledScore, color: meta.textColor, big: true },
+                { label: "Scaled Score", val: `${result.scaledScore}`, color: meta.textColor, big: true },
                 { label: "Correct / Total", val: `${result.correctAnswers}/${questions.length}`, color: "text-foreground" },
                 { label: "Accuracy", val: `${result.totalScore}%`, color: "text-foreground" },
                 {
@@ -1106,10 +1275,12 @@ export default function sectionalTest({ user }: { user: any }) {
                 </div>
               ))}
             </div>
+            <p className="text-[11px] text-muted-foreground text-center mt-3">
+              Scaled score (60–90) is a practice-test approximation based on accuracy, since GMAC's real adaptive scoring algorithm isn't public.
+            </p>
           </CardContent>
         </Card>
 
-        {/* Breakdown */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card className="p-5 text-center border-t-4 border-t-green-500">
             <CheckCircle2 className="mx-auto text-green-500 mb-2" size={24} />
@@ -1129,7 +1300,6 @@ export default function sectionalTest({ user }: { user: any }) {
           </Card>
         </div>
 
-        {/* Attempt rate bar */}
         <Card className="p-5">
           <div className="flex justify-between items-center mb-2">
             <span className="text-sm font-bold">Attempt Rate</span>
@@ -1138,6 +1308,12 @@ export default function sectionalTest({ user }: { user: any }) {
           <Progress value={attemptRate} className="h-2" />
           <p className="text-xs text-muted-foreground mt-2">
             You attempted {result.correctAnswers + result.wrongAnswers} of {questions.length} questions.
+            {typeof result.editsUsed === "number" && (
+              <> Used {result.editsUsed} of {MAX_EDITS_PER_SECTION} answer edits.</>
+            )}
+            {result.reachedReview === false && (
+              <> The Review &amp; Edit screen was not reached because time ran out first.</>
+            )}
           </p>
         </Card>
 
