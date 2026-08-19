@@ -66,8 +66,8 @@ const SHEET_CONFIG: Record<string, string[]> = {
   DailyTests: ["id", "testName", "testDate", "questionIds"],
   TestResults: ["id", "studentId", "testDate", "testId", "testName", "totalScore", "correctAnswers", "wrongAnswers", "skippedQuestions", "timeSpent", "sectionScores", "studentAnswers"],
   SectionalTests: ["id", "name", "section", "durationMinutes", "questionIds", "passageIds", "targetExam", "publishedDate"],
-  SectionalQuestions: ["id", "section", "questionText", "questionType", "options", "correctAnswer", "answerTolerance", "explanation", "difficulty", "passageId", "targetExam"],
-  SectionalPassages: ["id", "title", "text", "targetExam"],
+  SectionalQuestions: ["id", "section", "questionType", "questionText", "options", "correctAnswer", "typeData", "explanation", "difficulty", "passageId", "targetExam"],
+  SectionalPassages: ["id", "title", "kind", "text", "data", "chartImageUrl", "targetExam"],
   SectionalResults: ["id", "studentId", "testId", "section", "totalScore", "correctAnswers", "wrongAnswers", "wrongTITA", "skippedQuestions", "timeSpent", "studentAnswers", "scaledScore", "submittedAt"],
   MockTests: ["id", "name", "totalDurationMinutes", "sectionDurationMinutes", "questionIds", "passageIds", "targetExam", "publishedDate", "studentsAttempted"],
   MockQuestions: ["id", "section", "questionText", "questionType", "options", "correctAnswer", "answerTolerance", "explanation", "difficulty", "passageId", "targetExam"],
@@ -109,13 +109,16 @@ async function fetchSheetData(range: string, spreadsheetId: string | undefined =
 
     console.log(`✅ Mapping ${dataRows.length} rows from ${range} using headers: [${headers.join(", ")}]`);
 
-    const jsonFields = ["options", "questionIds", "passageIds", "sectionScores", "studentAnswers", "sectionResults"];
+    const jsonFields = ["options", "questionIds", "passageIds", "sectionScores", "studentAnswers", "sectionResults", "typeData", "data"];
     const numericFields = ["answerTolerance"];
 
-    return dataRows.map((row) => {
+    const objectFields = ["typeData"]; // JSON-blob columns that hold an object, not an array
+
+    const mapped = dataRows.map((row) => {
       const obj: any = {};
       expectedKeys.forEach((key) => {
         const index = headers.indexOf(key.toLowerCase());
+        const emptyDefault = objectFields.includes(key) ? {} : [];
         if (index !== -1) {
           let val = row[index] || "";
           if (jsonFields.includes(key)) {
@@ -123,10 +126,10 @@ async function fetchSheetData(range: string, spreadsheetId: string | undefined =
               try {
                 val = JSON.parse(val);
               } catch (e) {
-                val = [];
+                val = emptyDefault;
               }
             } else if (val === "") {
-              val = [];
+              val = emptyDefault;
             }
           } else if (numericFields.includes(key) && val !== "") {
             const n = Number(val);
@@ -134,11 +137,29 @@ async function fetchSheetData(range: string, spreadsheetId: string | undefined =
           }
           obj[key] = val;
         } else {
-          obj[key] = jsonFields.includes(key) ? [] : "";
+          obj[key] = jsonFields.includes(key) ? emptyDefault : "";
         }
       });
       return obj;
     });
+
+    // Unpack JSON-blob columns into the flat shape the frontend expects.
+    if (range === "SectionalQuestions") {
+      return mapped.map((q: any) => {
+        const { typeData, ...rest } = q;
+        return typeData && typeof typeData === "object" ? { ...rest, ...typeData } : rest;
+      });
+    }
+    if (range === "SectionalPassages") {
+      return mapped.map((p: any) => {
+        const { data, ...rest } = p;
+        if (p.kind === "table") return { ...rest, table: data };
+        if (p.kind === "tabs") return { ...rest, tabs: data };
+        return rest;
+      });
+    }
+
+    return mapped;
   } catch (err: any) {
     console.error(`❌ Error fetching sheet ${range} (spreadsheet ${spreadsheetId}):`, err.message);
     return null;
@@ -766,10 +787,23 @@ async function startServer() {
       const questions: any[] = req.body.questions;
       for (const q of questions) {
         const newQ = {
-          ...q,
           id: q.id || `SQ${Date.now()}${Math.random().toString(36).substr(2, 4)}`,
-          questionType: q.questionType === "TITA" ? "TITA" : "MCQ",
-          options: q.questionType === "TITA" ? [] : q.options || [],
+          section: q.section,
+          questionType: q.questionType,
+          questionText: q.questionText,
+          options: q.options || [],
+          correctAnswer: q.correctAnswer ?? "",
+          typeData: {
+            statements: q.statements,
+            blanks: q.blanks,
+            twoPartOptions: q.twoPartOptions,
+            correctPart1: q.correctPart1,
+            correctPart2: q.correctPart2,
+          },
+          explanation: q.explanation,
+          difficulty: q.difficulty,
+          passageId: q.passageId ?? "",
+          targetExam: q.targetExam || "CAT",
         };
         await appendSheetData("SectionalQuestions", newQ);
         const db = getLocalDB();
@@ -786,8 +820,13 @@ async function startServer() {
     if (req.user.role !== "admin") return res.sendStatus(403);
     try {
       const passage = {
-        ...req.body,
         id: req.body.id || `SP${Date.now()}`,
+        title: req.body.title,
+        kind: req.body.kind,
+        text: req.body.text ?? "",
+        data: req.body.kind === "table" ? req.body.table : req.body.kind === "tabs" ? req.body.tabs : undefined,
+        chartImageUrl: req.body.chartImageUrl ?? "",
+        targetExam: req.body.targetExam || "CAT",
       };
       await appendSheetData("SectionalPassages", passage);
       const db = getLocalDB();
