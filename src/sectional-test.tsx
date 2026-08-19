@@ -413,6 +413,15 @@ function RichText({ text }: { text: string }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Type guard — distinguishes a StimulusTable ({columns, rows}) from a plain
+// string, used by SourceTabs to pick SortableTable vs. RichText per tab.
+// ─────────────────────────────────────────────────────────────────────────
+
+function isTableContent(content: string | StimulusTable): content is StimulusTable {
+  return typeof content === "object" && content !== null && Array.isArray((content as StimulusTable).columns);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // BOARD — SortableTable (Table Analysis / MSR table tab)
 // Interactive: has its own local sort state, independent of the answer.
 // ─────────────────────────────────────────────────────────────────────────
@@ -520,7 +529,7 @@ function SourceTabs({ tabs }: { tabs: StimulusTab[] }) {
           </button>
         ))}
       </div>
-      <div className="p-4 text-sm leading-relaxed max-h- overflow-y-auto">
+      <div className="p-4 text-sm leading-relaxed max-h-72 overflow-y-auto">
          {tabs[active] && isTableContent(tabs[active].content) ? (
     <SortableTable columns={(tabs[active].content as StimulusTable).columns} rows={(tabs[active].content as StimulusTable).rows} />
   ) : (
