@@ -125,7 +125,11 @@ async function fetchSheetData(range: string, spreadsheetId: string | undefined =
             if (typeof val === "string" && (val.startsWith("[") || val.startsWith("{"))) {
               try {
                 val = JSON.parse(val);
-              } catch (e) {
+              } catch (e: any) {
+                console.error(
+                  `⚠️  JSON.parse failed for column "${key}" in sheet "${range}" (row will use empty default). ` +
+                    `Error: ${e.message}. Raw value (first 200 chars): ${String(val).slice(0, 200)}`
+                );
                 val = emptyDefault;
               }
             } else if (val === "") {
