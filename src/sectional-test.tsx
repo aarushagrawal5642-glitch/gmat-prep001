@@ -120,7 +120,7 @@ interface SectionalTest {
   section: GmatSection;
   durationMinutes: number;
   questions: SectionalQuestion[];
-  stimuli?: Stimulus[];
+  passages?: Stimulus[];
 }
 
 interface SectionalResult {
@@ -939,8 +939,8 @@ export default function sectionalTest({ user }: { user: any }) {
   useEffect(() => {
     if (!selectedTest || (view !== "test" && view !== "reviewEdit")) return;
     const q = selectedTest.questions[displayedIdx];
-    if (q?.passageId && selectedTest.stimuli) {
-      setActiveStimulus(selectedTest.stimuli.find((s) => s.id === q.passageId) || null);
+    if (q?.passageId && selectedTest.passages) {
+      setActiveStimulus(selectedTest.passages.find((s) => s.id === q.passageId) || null);
     } else {
       setActiveStimulus(null);
     }
@@ -1721,7 +1721,7 @@ export default function sectionalTest({ user }: { user: any }) {
               const studentAns = result.studentAnswers[q.id];
               const complete = isAnswerComplete(q, studentAns);
               const isCorrect = complete && isAnswerCorrect(q, studentAns);
-              const stimulus = q.passageId && selectedTest.stimuli ? selectedTest.stimuli.find((s) => s.id === q.passageId) : null;
+              const stimulus = q.passageId && selectedTest.passages ? selectedTest.passages.find((s) => s.id === q.passageId) : null;
 
               return (
                 <Card key={q.id} className={`border-l-4 ${isCorrect ? "border-l-green-500" : !complete ? "border-l-yellow-400" : "border-l-red-500"}`}>
