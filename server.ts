@@ -157,8 +157,18 @@ async function fetchSheetData(range: string, spreadsheetId: string | undefined =
     if (range === "SectionalPassages") {
       return mapped.map((p: any) => {
         const { data, ...rest } = p;
-        if (p.kind === "table") return { ...rest, table: data };
-        if (p.kind === "tabs") return { ...rest, tabs: data };
+        if (p.kind === "table") {
+          if (!data || (Array.isArray(data) && data.length === 0)) {
+            console.warn(`⚠️  SectionalPassages row "${p.id}" has kind="table" but empty/missing "data" column.`);
+          }
+          return { ...rest, table: data };
+        }
+        if (p.kind === "tabs") {
+          if (!data || (Array.isArray(data) && data.length === 0)) {
+            console.warn(`⚠️  SectionalPassages row "${p.id}" has kind="tabs" but empty/missing "data" column.`);
+          }
+          return { ...rest, tabs: data };
+        }
         return rest;
       });
     }
@@ -708,6 +718,12 @@ async function startServer() {
 
       const questions = allQuestions.filter((q: any) => qIds.includes(q.id));
       const passages = allPassages.filter((p: any) => pIds.includes(p.id));
+
+      console.log(
+        `🔎 Test "${id}": passageIds=${JSON.stringify(pIds)} | ` +
+          `allPassages ids present=${JSON.stringify(allPassages.map((p: any) => p.id))} | ` +
+          `matched passages=${JSON.stringify(passages.map((p: any) => ({ id: p.id, kind: p.kind, tabsCount: p.tabs?.length })))}`
+      );
 
       res.json({ ...test, questions, passages });
     } catch (err: any) {
