@@ -60,7 +60,7 @@ interface StimulusTable {
 
 interface StimulusTab {
   label: string;
-  content: string;
+  content: string | StimulusTable;
 }
 
 // The "Stimuli" sheet — one shared context object multiple questions can
@@ -520,8 +520,12 @@ function SourceTabs({ tabs }: { tabs: StimulusTab[] }) {
           </button>
         ))}
       </div>
-      <div className="p-4 text-sm leading-relaxed max-h-64 overflow-y-auto">
-        <RichText text={tabs[active]?.content ?? ""} />
+      <div className="p-4 text-sm leading-relaxed max-h- overflow-y-auto">
+         {tabs[active] && isTableContent(tabs[active].content) ? (
+    <SortableTable columns={(tabs[active].content as StimulusTable).columns} rows={(tabs[active].content as StimulusTable).rows} />
+  ) : (
+    <RichText text={(tabs[active]?.content as string) ?? ""} />
+  )}
       </div>
     </div>
   );
