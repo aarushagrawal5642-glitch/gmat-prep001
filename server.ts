@@ -819,18 +819,30 @@ async function startServer() {
   app.post("/api/sectional-passages", authenticateToken, async (req: any, res) => {
     if (req.user.role !== "admin") return res.sendStatus(403);
     try {
+      const sheetData = req.body.kind === "table" ? req.body.table : req.body.kind === "tabs" ? req.body.tabs : undefined;
       const passage = {
         id: req.body.id || `SP${Date.now()}`,
         title: req.body.title,
         kind: req.body.kind,
         text: req.body.text ?? "",
-        data: req.body.kind === "table" ? req.body.table : req.body.kind === "tabs" ? req.body.tabs : undefined,
+        data: sheetData, // shape written to the Sheet's "data" column
         chartImageUrl: req.body.chartImageUrl ?? "",
         targetExam: req.body.targetExam || "CAT",
       };
       await appendSheetData("SectionalPassages", passage);
       const db = getLocalDB();
-      db.sectionalPassages.push(passage);
+      // Local DB must mirror what fetchSheetData()'s unpacking step produces
+      // (table -> `table`, tabs -> `tabs`), not the raw `data` column shape,
+      // or the frontend's StimulusBoard switch finds nothing to render
+      // whenever a route falls back to getLocalDB() instead of the Sheet.
+      const { data, ...passageRest } = passage;
+      const localPassage =
+        req.body.kind === "table"
+          ? { ...passageRest, table: sheetData }
+          : req.body.kind === "tabs"
+          ? { ...passageRest, tabs: sheetData }
+          : passageRest;
+      db.sectionalPassages.push(localPassage);
       saveLocalDB(db);
       res.json({ success: true, passageId: passage.id });
     } catch (err: any) {
