@@ -16,7 +16,6 @@ import {
   Lock,
   ListChecks,
   Play,
-  RotateCcw,
   Coffee,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -62,6 +61,114 @@ interface FullMockTest {
   quantSection: SectionalTest;
   verbalSection: SectionalTest;
   dataInsightsSection: SectionalTest;
+}
+
+// ── Shapes that actually come back from the server ────────────────────────
+// GET /api/mock-tests returns lightweight summaries (id/section per question
+// only — no question text, options, etc). A single MockTest row holds
+// questions from ALL THREE sections mixed together (grouped by q.section),
+// unlike the old FullMockTest concept of three separately-authored tests.
+interface MockQuestionRef {
+  id: string;
+  section: GmatSection;
+}
+
+interface MockTestSummary {
+  id: string;
+  name: string;
+  description?: string;
+  totalDurationMinutes?: number;
+  sectionDurationMinutes?: number;
+  targetExam?: string;
+  publishedDate?: string;
+  studentsAttempted?: number;
+  questions: MockQuestionRef[];
+}
+
+// GET /api/mock-test/:id returns the full test with raw MockQuestion rows.
+// Unlike SectionalQuestions, the server does NOT unpack the `typeData`
+// blob for Mock questions, so statements/blanks/twoPartOptions/etc. arrive
+// nested under `typeData` and must be flattened on the client.
+interface RawMockQuestion extends Omit<SectionalQuestion, "statements" | "blanks" | "twoPartOptions" | "correctPart1" | "correctPart2"> {
+  typeData?: {
+    statements?: any[];
+    blanks?: any[];
+    twoPartOptions?: string[];
+    correctPart1?: string;
+    correctPart2?: string;
+  };
+}
+
+interface RawMockTestDetail {
+  id: string;
+  name: string;
+  description?: string;
+  totalDurationMinutes?: number;
+  sectionDurationMinutes?: number;
+  questions: RawMockQuestion[];
+  passages: any[];
+}
+
+// POST /api/mock-results (and what GET /api/mock-results echoes back) uses
+// these field names — testId (not mockId), overallScaledScore/totalScore
+// (not totalScaledScore), timeSpent (not totalTimeSpent), submittedAt (not
+// completedAt). sectionOrder isn't part of the official sheet schema, so it
+// only survives when the server is running on the local JSON fallback.
+interface RawMockResult {
+  id: string;
+  studentId: string;
+  testId: string;
+  totalScore?: number;
+  overallScaledScore?: number;
+  percentile?: number;
+  sectionResults: Record<GmatSection, SectionResult>;
+  studentAnswers?: AnswersMap;
+  timeSpent?: number;
+  submittedAt: string;
+  sectionOrder?: GmatSection[];
+}
+
+function unwrapMockQuestion(raw: RawMockQuestion): SectionalQuestion {
+  const { typeData, ...rest } = raw;
+  return {
+    ...(rest as SectionalQuestion),
+    ...(typeData || {}),
+  };
+}
+
+function buildFullMockTest(raw: RawMockTestDetail): FullMockTest {
+  const rawQuestions = raw.questions || [];
+  const rawPassages = raw.passages || [];
+  const sectionDuration = raw.sectionDurationMinutes || 45;
+
+  const makeSection = (sec: GmatSection): SectionalTest => ({
+    id: `${raw.id}-${sec}`,
+    name: `${raw.name} — ${SECTION_META[sec].label}`,
+    section: sec,
+    durationMinutes: sectionDuration,
+    questions: rawQuestions.filter((q) => q.section === sec).map(unwrapMockQuestion),
+    passages: rawPassages,
+  });
+
+  return {
+    id: raw.id,
+    name: raw.name,
+    description: raw.description,
+    quantSection: makeSection("Quant"),
+    verbalSection: makeSection("Verbal"),
+    dataInsightsSection: makeSection("DataInsights"),
+  };
+}
+
+function adaptMockResult(r: RawMockResult): FullMockResult {
+  return {
+    mockId: r.testId,
+    totalScaledScore: r.overallScaledScore ?? r.totalScore ?? 0,
+    sectionOrder: r.sectionOrder || (Object.keys(r.sectionResults || {}) as GmatSection[]),
+    sectionResults: r.sectionResults || ({} as Record<GmatSection, SectionResult>),
+    totalTimeSpent: r.timeSpent || 0,
+    completedAt: r.submittedAt,
+  };
 }
 
 type QuestionAnswer =
@@ -114,10 +221,11 @@ function calcScaledSectionScore(correct: number, total: number): number {
 
 export default function gmatMockTests({ user }: { user: any }) {
   const [view, setView] = useState<"list" | "orderSelect" | "testing" | "sectionReview" | "break" | "result">("list");
-  const [availableMocks, setAvailableMocks] = useState<FullMockTest[]>([]);
+  const [availableMocks, setAvailableMocks] = useState<MockTestSummary[]>([]);
   const [selectedMock, setSelectedMock] = useState<FullMockTest | null>(null);
   const [mockResults, setMockResults] = useState<Record<string, FullMockResult>>({});
   const [loading, setLoading] = useState(true);
+  const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
 
   // Workflow sequence state
   const [sectionOrder, setSectionOrder] = useState<GmatSection[]>(["Quant", "Verbal", "DataInsights"]);
@@ -142,17 +250,23 @@ export default function gmatMockTests({ user }: { user: any }) {
     return selectedMock.dataInsightsSection;
   }, [selectedMock, activeSectionType]);
 
-  // Fetch Mocks
+  // Fetch Mocks — these paths match the routes actually registered on the
+  // server (/api/mock-tests, /api/mock-results). The old /full-gmat-mocks
+  // and /full-gmat-results paths don't exist on the backend at all, which is
+  // why this always fell into the catch block and showed "Failed to load
+  // mock tests" no matter what data existed server-side.
   useEffect(() => {
     async function loadData() {
       try {
         const [mocks, results] = await Promise.all([
-          apiRequest("/full-gmat-mocks"),
-          apiRequest("/full-gmat-results"),
+          apiRequest("/mock-tests"),
+          apiRequest("/mock-results"),
         ]);
         setAvailableMocks(mocks || []);
         const resMap: Record<string, FullMockResult> = {};
-        (results || []).forEach((r: FullMockResult) => (resMap[r.mockId] = r));
+        (results || []).forEach((r: RawMockResult) => {
+          resMap[r.testId] = adaptMockResult(r);
+        });
         setMockResults(resMap);
       } catch {
         toast.error("Failed to load mock tests");
@@ -185,10 +299,44 @@ export default function gmatMockTests({ user }: { user: any }) {
     }
   }, [sectionTimeLeft]);
 
-  const handleStartMockConfig = (mock: FullMockTest) => {
-    setSelectedMock(mock);
+  // Fetches the full question set for a mock (GET /api/mock-test/:id) and
+  // builds the three-section FullMockTest shape the rest of the component
+  // expects. This has to be a separate round trip because /api/mock-tests
+  // (the list endpoint) only returns question id + section, not question
+  // text/options — sending full question data for every mock up front would
+  // be wasteful, so the server only sends it per-test on demand.
+  const fetchFullMock = async (mockId: string): Promise<FullMockTest | null> => {
+    setDetailLoadingId(mockId);
+    try {
+      const detail = await apiRequest(`/mock-test/${mockId}`);
+      return buildFullMockTest(detail);
+    } catch {
+      toast.error("Failed to load this mock test's questions");
+      return null;
+    } finally {
+      setDetailLoadingId(null);
+    }
+  };
+
+  const handleStartMockConfig = async (mock: MockTestSummary) => {
+    const full = await fetchFullMock(mock.id);
+    if (!full) return;
+    setSelectedMock(full);
     setSectionOrder(["Quant", "Verbal", "DataInsights"]);
     setView("orderSelect");
+  };
+
+  // The backend only allows one attempt per student per mock test
+  // (POST /api/mock-results returns a 400 "Already attempted..." on a
+  // second submission for the same testId). So a completed mock can only be
+  // reviewed, not retaken — jump straight to the score report instead of
+  // letting the person sit through the full 135-minute exam only to have
+  // the final save silently fail.
+  const handleViewReport = async (mock: MockTestSummary) => {
+    const full = await fetchFullMock(mock.id);
+    if (!full) return;
+    setSelectedMock(full);
+    setView("result");
   };
 
   const startFullMock = () => {
@@ -267,23 +415,54 @@ export default function gmatMockTests({ user }: { user: any }) {
 
     const totalScaledScore = calcTotalGmatScore(qRes, vRes, diRes);
     const totalTimeSpent = Object.values(finalSecResults).reduce((acc, curr) => acc + (curr?.timeSpent || 0), 0);
+    const mergedAnswers: AnswersMap = Object.values(finalSecResults).reduce(
+      (acc, curr) => ({ ...acc, ...(curr?.studentAnswers || {}) }),
+      {} as AnswersMap
+    );
 
-    const fullResultPayload: FullMockResult = {
-      mockId: selectedMock.id,
-      totalScaledScore,
+    // Field names here match SHEET_CONFIG.MockResults on the server
+    // (testId, totalScore, overallScaledScore, sectionResults,
+    // studentAnswers, timeSpent) so the row saves correctly whether the
+    // backend is writing to the Google Sheet or the local JSON fallback.
+    // sectionOrder isn't part of that schema so it only round-trips via the
+    // local fallback, not the Sheet — adaptMockResult() falls back to
+    // deriving an order from sectionResults' keys when it's missing.
+    const resultPayload = {
+      testId: selectedMock.id,
+      totalScore: qRes + vRes + diRes,
+      overallScaledScore: totalScaledScore,
+      sectionResults: finalSecResults,
+      studentAnswers: mergedAnswers,
+      timeSpent: totalTimeSpent,
       sectionOrder,
-      sectionResults: finalSecResults as Record<GmatSection, SectionResult>,
-      totalTimeSpent,
-      completedAt: new Date().toISOString(),
     };
 
     try {
-      await apiRequest("/full-gmat-results", { method: "POST", body: JSON.stringify(fullResultPayload) });
-      setMockResults((prev) => ({ ...prev, [selectedMock.id]: fullResultPayload }));
+      const saved: RawMockResult = await apiRequest("/mock-results", {
+        method: "POST",
+        body: JSON.stringify(resultPayload),
+      });
+      setMockResults((prev) => ({ ...prev, [selectedMock.id]: adaptMockResult(saved) }));
       setView("result");
       toast.success("Full Mock Test Completed!");
-    } catch {
-      toast.error("Failed to save full exam result.");
+    } catch (err: any) {
+      const alreadyAttempted = /already attempted/i.test(err?.message || "");
+      toast.error(alreadyAttempted ? "This mock test was already submitted once." : "Failed to save full exam result.");
+      // The save failed (or was rejected as a duplicate attempt), but the
+      // person still just finished the exam — show their score locally
+      // even though it didn't persist, rather than falling through to a
+      // blank screen because mockResults[selectedMock.id] was never set.
+      setMockResults((prev) => ({
+        ...prev,
+        [selectedMock.id]: {
+          mockId: selectedMock.id,
+          totalScaledScore,
+          sectionOrder,
+          sectionResults: finalSecResults as Record<GmatSection, SectionResult>,
+          totalTimeSpent,
+          completedAt: new Date().toISOString(),
+        },
+      }));
       setView("result");
     }
   };
@@ -332,9 +511,22 @@ export default function gmatMockTests({ user }: { user: any }) {
                     </div>
                   )}
 
-                  <Button className="w-full gap-2" onClick={() => handleStartMockConfig(mock)}>
-                    {completed ? <RotateCcw size={16} /> : <Play size={16} />}
-                    {completed ? "Retake Mock Exam" : "Start Mock Exam"}
+                  {/* Each student gets one attempt per mock (enforced by the
+                      server), so a completed mock opens the score report
+                      instead of restarting the exam. */}
+                  <Button
+                    className="w-full gap-2"
+                    disabled={detailLoadingId === mock.id}
+                    onClick={() => (completed ? handleViewReport(mock) : handleStartMockConfig(mock))}
+                  >
+                    {detailLoadingId === mock.id ? (
+                      <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                    ) : completed ? (
+                      <Eye size={16} />
+                    ) : (
+                      <Play size={16} />
+                    )}
+                    {completed ? "View Score Report" : "Start Mock Exam"}
                   </Button>
                 </CardContent>
               </Card>
