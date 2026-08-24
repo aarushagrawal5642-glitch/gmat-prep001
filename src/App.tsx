@@ -260,7 +260,7 @@ export default function App() {
             <SidebarItem icon={LayoutDashboard} label="Dashboard" active={activeTab === "dashboard"} onClick={() => setActiveTab("dashboard")} />
             <SidebarItem icon={ClipboardList} label="Daily Practice" active={activeTab === "daily-test"} onClick={() => setActiveTab("daily-test")} highlight />
             <SidebarItem icon={ClipboardList} label="Sectional Tests" active={activeTab === "sectional"} onClick={() => setActiveTab("sectional")} highlight /> 
-            <SidebarItem icon={ClipboardList} label="Sectional Tests" active={activeTab === "mocks"} onClick={() => setActiveTab("mocks")} highlight />            
+            <SidebarItem icon={ClipboardList} label="Mock Tests" active={activeTab === "mocks"} onClick={() => setActiveTab("mocks")} highlight />            
             <SidebarItem icon={BookOpen} label="Course Materials" active={activeTab === "courses"} onClick={() => setActiveTab("courses")} />
             <SidebarItem icon={Video} label="Video Lectures" active={activeTab === "videos"} onClick={() => setActiveTab("videos")} />
             <SidebarItem icon={History} label="Test History" active={activeTab === "history"} onClick={() => setActiveTab("history")} />
