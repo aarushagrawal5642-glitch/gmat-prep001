@@ -137,6 +137,7 @@ interface SectionResult {
   skipped: number;
   timeSpent: number;
   studentAnswers: AnswersMap;
+  editsUsed?: number;
 }
 
 interface FullMockResult {
@@ -233,6 +234,22 @@ interface RawMockResult {
 // ─────────────────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────
+
+// GMAT Focus Edition gives every one of the 3! = 6 possible section orders,
+// not just a curated 4.
+const SECTION_ORDER_OPTIONS: GmatSection[][] = [
+  ["Quant", "Verbal", "DataInsights"],
+  ["Quant", "DataInsights", "Verbal"],
+  ["Verbal", "Quant", "DataInsights"],
+  ["Verbal", "DataInsights", "Quant"],
+  ["DataInsights", "Quant", "Verbal"],
+  ["DataInsights", "Verbal", "Quant"],
+];
+
+// On the real exam, the Question Review & Edit screen at the end of each
+// section lets you revisit any question, but you may change at most 3
+// answers total for that section.
+const MAX_EDITS_PER_SECTION = 3;
 
 const SECTION_META: Record<
   GmatSection,
@@ -346,6 +363,10 @@ function isAnswerCorrect(q: SectionalQuestion, ans?: QuestionAnswer): boolean {
     case "twoPart":
       return ans.part1 === q.correctPart1 && ans.part2 === q.correctPart2;
   }
+}
+
+function answersEqual(a: QuestionAnswer, b: QuestionAnswer): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -947,12 +968,39 @@ function QuestionBody({
   }
 }
 
+function StatusDot({
+  idx,
+  answered,
+  flagged,
+  current,
+  onClick,
+}: {
+  idx: number;
+  answered: boolean;
+  flagged: boolean;
+  current: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-9 h-9 rounded-lg text-xs font-bold transition-all flex items-center justify-center relative
+        ${current ? "ring-2 ring-offset-1 ring-primary scale-110" : ""}
+        ${answered ? "bg-blue-500 text-white" : "bg-secondary text-muted-foreground hover:bg-secondary/80"}
+      `}
+    >
+      {idx + 1}
+      {flagged && <span className="absolute -top-1 -right-1 w-3 h-3 bg-orange-400 rounded-full" />}
+    </button>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────
 
 export default function gmatMockTests({ user }: { user: any }) {
-  const [view, setView] = useState<"list" | "orderSelect" | "testing" | "break" | "result">("list");
+  const [view, setView] = useState<"list" | "orderSelect" | "testing" | "reviewEdit" | "break" | "result">("list");
   const [availableMocks, setAvailableMocks] = useState<MockTestSummary[]>([]);
   const [selectedMock, setSelectedMock] = useState<FullMockTest | null>(null);
   const [mockResults, setMockResults] = useState<Record<string, FullMockResult>>({});
@@ -972,6 +1020,20 @@ export default function gmatMockTests({ user }: { user: any }) {
   const [sectionTimeLeft, setSectionTimeLeft] = useState(45 * 60);
   const [completedSectionResults, setCompletedSectionResults] = useState<Partial<Record<GmatSection, SectionResult>>>({});
   const [activeStimulus, setActiveStimulus] = useState<Stimulus | null>(null);
+
+  // Question Review & Edit (mid-section, pre-submission) — forward pass is
+  // one question at a time with no going back; once you've answered the
+  // last question you land here and may edit up to MAX_EDITS_PER_SECTION
+  // answers before the section locks in.
+  const [reviewQIdx, setReviewQIdx] = useState(0);
+  const [editedQs, setEditedQs] = useState<Set<string>>(new Set());
+  const reachedReviewRef = useRef(false);
+  const editsUsed = editedQs.size;
+  const editsLeft = MAX_EDITS_PER_SECTION - editsUsed;
+
+  // Post-submission full answer review (after the whole mock is finished)
+  const [reviewMode, setReviewMode] = useState(false);
+  const [reviewSection, setReviewSection] = useState<GmatSection>("Quant");
 
   const activeSectionType = sectionOrder[currentSectionIdx];
 
@@ -1009,9 +1071,10 @@ export default function gmatMockTests({ user }: { user: any }) {
     loadData();
   }, []);
 
-  // Section Timer
+  // Section Timer — keeps running through the Review & Edit screen too,
+  // just like the real exam (the clock never pauses within a section).
   useEffect(() => {
-    if (view !== "testing" || sectionTimeLeft <= 0) return;
+    if ((view !== "testing" && view !== "reviewEdit") || sectionTimeLeft <= 0) return;
     const t = setInterval(() => setSectionTimeLeft((prev) => prev - 1), 1000);
     return () => clearInterval(t);
   }, [view, sectionTimeLeft]);
@@ -1023,27 +1086,29 @@ export default function gmatMockTests({ user }: { user: any }) {
     return () => clearInterval(t);
   }, [view, breakTimeLeft]);
 
-  // Auto-submit Section on Timeout
+  // Auto-submit Section on Timeout — if time runs out mid-question the
+  // Review & Edit screen is skipped entirely, matching the real exam.
   useEffect(() => {
-    if (view === "testing" && sectionTimeLeft === 0) {
+    if ((view === "testing" || view === "reviewEdit") && sectionTimeLeft === 0) {
       toast.warning("Section time expired! Submitting section...");
       completeCurrentSection();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionTimeLeft]);
 
-  // Active stimulus for whichever question is currently on screen — this is
-  // what was missing entirely before, so passages never rendered no matter
-  // the section.
+  // Active stimulus for whichever question is currently on screen — tracks
+  // the forward-pass question while testing, and the selected question
+  // while on the Review & Edit screen.
+  const displayedQIdx = view === "reviewEdit" ? reviewQIdx : currentQIdx;
   useEffect(() => {
-    if (!currentSectionData || view !== "testing") return;
-    const q = currentSectionData.questions[currentQIdx];
+    if (!currentSectionData || (view !== "testing" && view !== "reviewEdit")) return;
+    const q = currentSectionData.questions[displayedQIdx];
     if (q?.passageId && currentSectionData.passages) {
       setActiveStimulus(currentSectionData.passages.find((s) => s.id === q.passageId) || null);
     } else {
       setActiveStimulus(null);
     }
-  }, [currentQIdx, currentSectionData, view]);
+  }, [displayedQIdx, currentSectionData, view]);
 
   // Fetches the full question set for a mock (GET /api/mock-test/:id) and
   // builds the three-section FullMockTest shape the rest of the component
@@ -1076,6 +1141,7 @@ export default function gmatMockTests({ user }: { user: any }) {
     const full = await fetchFullMock(mock.id);
     if (!full) return;
     setSelectedMock(full);
+    setReviewMode(false);
     setView("result");
   };
 
@@ -1094,8 +1160,11 @@ export default function gmatMockTests({ user }: { user: any }) {
     else secData = selectedMock?.dataInsightsSection;
 
     setCurrentQIdx(0);
+    setReviewQIdx(0);
     setSectionAnswers({});
     setFlaggedQs(new Set());
+    setEditedQs(new Set());
+    reachedReviewRef.current = false;
     setActiveStimulus(null);
     setSectionTimeLeft((secData?.durationMinutes || 45) * 60);
     setView("testing");
@@ -1109,13 +1178,55 @@ export default function gmatMockTests({ user }: { user: any }) {
     });
   }, []);
 
-  const changeAnswer = (qId: string, mutate: (prev: QuestionAnswer) => QuestionAnswer) => {
+  // Forward phase: free to change your mind on the CURRENT (unlocked)
+  // question as many times as you like — no edit cost.
+  const forwardChange = (qId: string, mutate: (prev: QuestionAnswer) => QuestionAnswer) => {
     const q = questionById[qId];
     if (!q) return;
     setSectionAnswers((prev) => {
       const current = prev[qId] ?? emptyAnswerFor(q);
       return { ...prev, [qId]: mutate(current) };
     });
+  };
+
+  // Review phase: every question is already locked. Changing a question's
+  // answer for the first time during review consumes 1 of the 3 edits for
+  // the whole section; further tweaks to that same question are then free.
+  const reviewChange = (qId: string, mutate: (prev: QuestionAnswer) => QuestionAnswer) => {
+    const q = questionById[qId];
+    if (!q) return;
+    const current = sectionAnswers[qId] ?? emptyAnswerFor(q);
+    const next = mutate(current);
+    if (answersEqual(current, next)) return;
+
+    const alreadyEdited = editedQs.has(qId);
+    if (!alreadyEdited && editsLeft <= 0) {
+      toast.error("You've used all 3 answer changes allowed for this section.");
+      return;
+    }
+    setSectionAnswers((prev) => ({ ...prev, [qId]: next }));
+    if (!alreadyEdited) {
+      setEditedQs((prev) => new Set(prev).add(qId));
+    }
+  };
+
+  const changeAnswer = view === "reviewEdit" ? reviewChange : forwardChange;
+
+  const goNextQuestion = () => {
+    if (!currentSectionData) return;
+    const questions = currentSectionData.questions;
+    const q = questions[currentQIdx];
+    if (!isAnswerComplete(q, sectionAnswers[q.id])) {
+      toast.error("You must complete this question before moving to the next one.");
+      return;
+    }
+    if (currentQIdx < questions.length - 1) {
+      setCurrentQIdx((i) => i + 1);
+    } else {
+      reachedReviewRef.current = true;
+      setReviewQIdx(0);
+      setView("reviewEdit");
+    }
   };
 
   const setSingle = (qId: string, val: string) => changeAnswer(qId, () => ({ kind: "single", value: val }));
@@ -1162,6 +1273,7 @@ export default function gmatMockTests({ user }: { user: any }) {
       skipped,
       timeSpent,
       studentAnswers: sectionAnswers,
+      editsUsed,
     };
 
     const updatedResults = { ...completedSectionResults, [activeSectionType]: secResult };
@@ -1215,6 +1327,7 @@ export default function gmatMockTests({ user }: { user: any }) {
         body: JSON.stringify(resultPayload),
       });
       setMockResults((prev) => ({ ...prev, [selectedMock.id]: adaptMockResult(saved) }));
+      setReviewMode(false);
       setView("result");
       toast.success("Full Mock Test Completed!");
     } catch (err: any) {
@@ -1233,6 +1346,7 @@ export default function gmatMockTests({ user }: { user: any }) {
           completedAt: new Date().toISOString(),
         },
       }));
+      setReviewMode(false);
       setView("result");
     }
   };
@@ -1318,22 +1432,17 @@ export default function gmatMockTests({ user }: { user: any }) {
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-3">
-              {[
-                ["Quant", "Verbal", "DataInsights"],
-                ["Verbal", "Quant", "DataInsights"],
-                ["DataInsights", "Verbal", "Quant"],
-                ["Quant", "DataInsights", "Verbal"],
-              ].map((order, idx) => (
+              {SECTION_ORDER_OPTIONS.map((order, idx) => (
                 <button
                   key={idx}
-                  onClick={() => setSectionOrder(order as GmatSection[])}
+                  onClick={() => setSectionOrder(order)}
                   className={`w-full p-4 rounded-xl border-2 text-left font-bold text-sm flex items-center justify-between transition-all ${
                     JSON.stringify(sectionOrder) === JSON.stringify(order)
                       ? "border-primary bg-primary/5 text-primary"
                       : "border-border hover:border-primary/40"
                   }`}
                 >
-                  <span>{order.map((s) => SECTION_META[s as GmatSection].short).join(" → ")}</span>
+                  <span>{order.map((s) => SECTION_META[s].short).join(" → ")}</span>
                   {JSON.stringify(sectionOrder) === JSON.stringify(order) && <CheckCircle2 size={18} />}
                 </button>
               ))}
@@ -1376,13 +1485,17 @@ export default function gmatMockTests({ user }: { user: any }) {
     );
   }
 
-  // 4. TEST ATTEMPT VIEW
+  // 4. TEST ATTEMPT VIEW — one question at a time, forward-only. You must
+  // answer the current question before Next unlocks, and there's no way
+  // to skip ahead or go back until the Review & Edit screen.
   if (view === "testing" && currentSectionData) {
     const q = currentSectionData.questions[currentQIdx];
     const meta = SECTION_META[activeSectionType];
     const answeredCount = currentSectionData.questions.filter((qq) => isAnswerComplete(qq, sectionAnswers[qq.id])).length;
     const progress = (answeredCount / currentSectionData.questions.length) * 100;
     const showHeaderPrompt = q?.questionType !== "graphics_interpretation";
+    const isLast = currentQIdx === currentSectionData.questions.length - 1;
+    const answered = isAnswerComplete(q, sectionAnswers[q?.id]);
 
     if (!q) return null;
 
@@ -1424,21 +1537,21 @@ export default function gmatMockTests({ user }: { user: any }) {
                 <Badge variant="outline" className="text-[10px]">
                   {QUESTION_TYPE_LABELS[q.questionType]}
                 </Badge>
+                {!answered && (
+                  <span className="text-[10px] font-bold text-orange-500 flex items-center gap-1">
+                    <AlertCircle size={12} /> Complete this question to continue
+                  </span>
+                )}
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => toggleFlag(q.id)}
-                  className={`p-1.5 rounded-lg transition-colors ${
-                    flaggedQs.has(q.id) ? "text-orange-500 bg-orange-50" : "text-muted-foreground hover:bg-secondary"
-                  }`}
-                  title="Bookmark for review"
-                >
-                  <Flag size={16} fill={flaggedQs.has(q.id) ? "currentColor" : "none"} />
-                </button>
-                <Button variant="ghost" size="sm" onClick={() => completeCurrentSection()}>
-                  End Section Early
-                </Button>
-              </div>
+              <button
+                onClick={() => toggleFlag(q.id)}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  flaggedQs.has(q.id) ? "text-orange-500 bg-orange-50" : "text-muted-foreground hover:bg-secondary"
+                }`}
+                title="Bookmark for review"
+              >
+                <Flag size={16} fill={flaggedQs.has(q.id) ? "currentColor" : "none"} />
+              </button>
             </div>
             {showHeaderPrompt && (
               <CardTitle className="text-base mt-2 font-semibold leading-relaxed">
@@ -1457,22 +1570,218 @@ export default function gmatMockTests({ user }: { user: any }) {
               onSelectPart2={(val) => setPart2(q.id, val)}
             />
 
-            <div className="flex justify-between items-center pt-4 border-t">
-              <Button variant="outline" disabled={currentQIdx === 0} onClick={() => setCurrentQIdx((i) => i - 1)}>
+            <div className="flex justify-end items-center pt-4 border-t">
+              <Button onClick={goNextQuestion} disabled={!answered} className="gap-1" size="lg">
+                {isLast ? (
+                  <>
+                    Answer &amp; Continue to Review <ChevronRight size={16} />
+                  </>
+                ) : (
+                  <>
+                    Next Question <ChevronRight size={16} />
+                  </>
+                )}
+              </Button>
+            </div>
+            <p className="text-center text-xs text-muted-foreground">
+              You can bookmark this question, but you cannot skip it or come back to it until the Review &amp; Edit screen.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // 4b. QUESTION REVIEW & EDIT VIEW — reached after answering the last
+  // question of the section (assuming time didn't run out first). You can
+  // revisit any question, but changing an answer costs 1 of 3 edits for
+  // the whole section.
+  if (view === "reviewEdit" && currentSectionData) {
+    const questions = currentSectionData.questions;
+    const meta = SECTION_META[activeSectionType];
+    const reviewQ = questions[reviewQIdx];
+    if (!reviewQ) return null;
+    const canEditThisQuestion = editedQs.has(reviewQ.id) || editsLeft > 0;
+    const answeredCount = questions.filter((qq) => isAnswerComplete(qq, sectionAnswers[qq.id])).length;
+    const showHeaderPrompt = reviewQ.questionType !== "graphics_interpretation";
+
+    return (
+      <div className="max-w-6xl mx-auto space-y-4 py-4">
+        <div className="flex items-center justify-between bg-card p-4 rounded-xl border shadow-sm flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <Badge className={`${meta.color} text-white border-none`}>{meta.label}</Badge>
+            <span className="text-sm font-bold flex items-center gap-1">
+              <ListChecks size={14} /> Question Review &amp; Edit
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <div
+              className={`hidden sm:flex items-center gap-2 text-xs font-bold px-2.5 py-1 rounded-lg ${
+                editsLeft === 0 ? "bg-red-100 text-red-600" : "bg-secondary text-foreground"
+              }`}
+            >
+              {editsLeft === 0 ? <Lock size={12} /> : null}
+              {editsLeft} of {MAX_EDITS_PER_SECTION} edits left
+            </div>
+            <div
+              className={`flex items-center gap-2 font-mono font-bold text-sm px-3 py-1.5 rounded-lg ${
+                sectionTimeLeft < 300 ? "bg-red-100 text-red-600 animate-pulse" : "bg-secondary text-foreground"
+              }`}
+            >
+              <Clock size={14} />
+              {formatTime(sectionTimeLeft)}
+            </div>
+            <Button size="sm" variant="destructive" onClick={completeCurrentSection}>
+              Submit Section
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_260px] gap-6">
+          <div className="space-y-4">
+            <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-800">
+              You can open any question below. Changing the answer on a question for the first time this review uses one of your{" "}
+              <strong>{MAX_EDITS_PER_SECTION} edits</strong> for this section — after that, you can keep adjusting that same
+              question for free. Viewing a question never costs an edit.
+            </div>
+
+            {activeStimulus && (
+              <Card className="border-l-4 border-l-violet-400">
+                <CardHeader className="pb-2">
+                  <span className="text-xs font-bold uppercase text-muted-foreground tracking-wide">
+                    {STIMULUS_KIND_LABELS[activeStimulus.kind]} · {activeStimulus.title}
+                  </span>
+                </CardHeader>
+                <CardContent>
+                  <StimulusBoard stimulus={activeStimulus} />
+                </CardContent>
+              </Card>
+            )}
+
+            <Card className="shadow-md">
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${meta.lightColor} ${meta.textColor}`}>
+                      Q {reviewQIdx + 1} / {questions.length}
+                    </span>
+                    <Badge variant="outline" className="text-[10px]">
+                      {QUESTION_TYPE_LABELS[reviewQ.questionType]}
+                    </Badge>
+                    {editedQs.has(reviewQ.id) && (
+                      <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 border-none text-[10px]">Edited</Badge>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => toggleFlag(reviewQ.id)}
+                    className={`p-1.5 rounded-lg transition-colors ${
+                      flaggedQs.has(reviewQ.id) ? "text-orange-500 bg-orange-50" : "text-muted-foreground hover:bg-secondary"
+                    }`}
+                    title="Bookmark"
+                  >
+                    <Flag size={16} fill={flaggedQs.has(reviewQ.id) ? "currentColor" : "none"} />
+                  </button>
+                </div>
+                {showHeaderPrompt && (
+                  <p className="text-base font-semibold leading-relaxed mt-3">
+                    <MultiParagraphLatex text={reviewQ.questionText} />
+                  </p>
+                )}
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <QuestionBody
+                  question={reviewQ}
+                  answer={sectionAnswers[reviewQ.id]}
+                  disabled={!canEditThisQuestion}
+                  onSelectSingle={(val) => setSingle(reviewQ.id, val)}
+                  onSelectStatement={(stId, val) => setStatement(reviewQ.id, stId, val)}
+                  onSelectBlank={(blankId, val) => setBlank(reviewQ.id, blankId, val)}
+                  onSelectPart1={(val) => setPart1(reviewQ.id, val)}
+                  onSelectPart2={(val) => setPart2(reviewQ.id, val)}
+                />
+                {!canEditThisQuestion && (
+                  <p className="text-xs text-red-600 flex items-center gap-1 mt-2">
+                    <Lock size={12} /> You've used all {MAX_EDITS_PER_SECTION} answer changes for this section — this question's
+                    answer is now locked.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            <div className="flex justify-between items-center">
+              <Button
+                variant="outline"
+                onClick={() => setReviewQIdx((i) => Math.max(0, i - 1))}
+                disabled={reviewQIdx === 0}
+                className="gap-1"
+              >
                 <ChevronLeft size={16} /> Previous
               </Button>
-              {currentQIdx < currentSectionData.questions.length - 1 ? (
-                <Button onClick={() => setCurrentQIdx((i) => i + 1)}>
+              {reviewQIdx < questions.length - 1 ? (
+                <Button variant="outline" onClick={() => setReviewQIdx((i) => Math.min(questions.length - 1, i + 1))} className="gap-1">
                   Next <ChevronRight size={16} />
                 </Button>
               ) : (
                 <Button variant="destructive" onClick={completeCurrentSection}>
-                  Finish Section
+                  Submit Section
                 </Button>
               )}
             </div>
-          </CardContent>
-        </Card>
+          </div>
+
+          <div className="lg:sticky lg:top-4 self-start space-y-4">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm">All Questions</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-5 gap-1.5 mb-4">
+                  {questions.map((qq, idx) => (
+                    <StatusDot
+                      key={qq.id}
+                      idx={idx}
+                      answered={isAnswerComplete(qq, sectionAnswers[qq.id])}
+                      flagged={flaggedQs.has(qq.id)}
+                      current={idx === reviewQIdx}
+                      onClick={() => setReviewQIdx(idx)}
+                    />
+                  ))}
+                </div>
+                <div className="space-y-1.5 text-xs text-muted-foreground border-t pt-3">
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded bg-blue-500" />
+                    Answered ({answeredCount})
+                  </div>
+                  <div className="flex items-center gap-2 relative">
+                    <div className="w-4 h-4 rounded bg-secondary border relative">
+                      <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-orange-400 rounded-full" />
+                    </div>
+                    Bookmarked ({flaggedQs.size})
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className={`border ${meta.borderColor}`}>
+              <CardContent className="pt-4 space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Edits remaining</span>
+                  <span className={`font-bold ${editsLeft === 0 ? "text-red-600" : meta.textColor}`}>
+                    {editsLeft} / {MAX_EDITS_PER_SECTION}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Bookmarked</span>
+                  <span className="font-bold text-orange-500">{flaggedQs.size}</span>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Button className="w-full gap-2" size="lg" variant="destructive" onClick={completeCurrentSection}>
+              Submit Section
+            </Button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1480,6 +1789,141 @@ export default function gmatMockTests({ user }: { user: any }) {
   // 5. FINAL EXAM SCORE CARD VIEW
   if (view === "result" && selectedMock && mockResults[selectedMock.id]) {
     const res = mockResults[selectedMock.id];
+
+    const sectionDataFor = (sec: GmatSection): SectionalTest =>
+      sec === "Quant" ? selectedMock.quantSection : sec === "Verbal" ? selectedMock.verbalSection : selectedMock.dataInsightsSection;
+
+    // ── Post-submission review: every question, the student's answer, the
+    // correct answer, and the explanation — grouped by section tab.
+    if (reviewMode) {
+      const secData = sectionDataFor(reviewSection);
+      const secResult = res.sectionResults[reviewSection];
+      const studentAnswers = secResult?.studentAnswers || {};
+      const meta = SECTION_META[reviewSection];
+
+      return (
+        <div className="max-w-4xl mx-auto space-y-6 py-6">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" onClick={() => setReviewMode(false)} className="gap-1">
+              <ArrowLeft size={16} /> Back to Score Report
+            </Button>
+          </div>
+
+          <div className="flex gap-2 border-b overflow-x-auto">
+            {(["Quant", "Verbal", "DataInsights"] as GmatSection[]).map((sec) => {
+              const m = SECTION_META[sec];
+              return (
+                <button
+                  key={sec}
+                  onClick={() => setReviewSection(sec)}
+                  className={`px-4 py-2 text-sm font-bold whitespace-nowrap border-b-2 transition-colors ${
+                    reviewSection === sec ? `${m.textColor} border-current` : "text-muted-foreground border-transparent hover:text-foreground"
+                  }`}
+                >
+                  {m.short}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="space-y-4">
+            {secData.questions.map((q, idx) => {
+              const studentAns = studentAnswers[q.id];
+              const complete = isAnswerComplete(q, studentAns);
+              const isCorrect = complete && isAnswerCorrect(q, studentAns);
+              const stimulus = q.passageId && secData.passages ? secData.passages.find((s) => s.id === q.passageId) : null;
+
+              return (
+                <Card key={q.id} className={`border-l-4 ${isCorrect ? "border-l-green-500" : !complete ? "border-l-yellow-400" : "border-l-red-500"}`}>
+                  <CardHeader className="pb-2">
+                    <div className="flex justify-between items-center flex-wrap gap-2">
+                      <div className="flex gap-2 flex-wrap">
+                        <Badge variant="outline" className={`${meta.lightColor} ${meta.textColor} ${meta.borderColor} text-[10px]`}>
+                          {meta.short}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px]">
+                          {QUESTION_TYPE_LABELS[q.questionType]}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px]">
+                          {q.difficulty}
+                        </Badge>
+                      </div>
+                      {isCorrect ? (
+                        <span className="text-green-600 flex items-center gap-1 text-xs font-bold">
+                          <CheckCircle2 size={14} /> Correct
+                        </span>
+                      ) : !complete ? (
+                        <span className="text-yellow-600 flex items-center gap-1 text-xs font-bold">
+                          <AlertCircle size={14} /> Skipped
+                        </span>
+                      ) : (
+                        <span className="text-red-600 flex items-center gap-1 text-xs font-bold">
+                          <XCircle size={14} /> Incorrect
+                        </span>
+                      )}
+                    </div>
+                    <p className="font-semibold text-sm mt-2">
+                      <span>Q{idx + 1}. </span>
+                      <MultiParagraphLatex text={q.questionText} />
+                    </p>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {stimulus && (
+                      <div className="rounded-lg border p-3 bg-secondary/20">
+                        <p className="text-[10px] font-bold uppercase text-muted-foreground mb-2">
+                          {STIMULUS_KIND_LABELS[stimulus.kind]} · {stimulus.title}
+                        </p>
+                        <StimulusBoard stimulus={stimulus} />
+                      </div>
+                    )}
+
+                    <QuestionBody
+                      question={q}
+                      answer={studentAns}
+                      disabled
+                      onSelectSingle={() => {}}
+                      onSelectStatement={() => {}}
+                      onSelectBlank={() => {}}
+                      onSelectPart1={() => {}}
+                      onSelectPart2={() => {}}
+                    />
+
+                    {q.questionType === "standard_mcq" || (q.questionType === "multi_source_reasoning" && !q.statements?.length) ? (
+                      <div className="grid gap-1.5">
+                        {(q.options ?? []).map((opt) => (
+                          <div
+                            key={opt}
+                            className={`px-3 py-2 rounded-lg text-sm border ${
+                              opt === q.correctAnswer
+                                ? "bg-green-50 border-green-200 text-green-800 font-medium"
+                                : opt === (studentAns?.kind === "single" ? studentAns.value : undefined)
+                                ? "bg-red-50 border-red-200 text-red-800"
+                                : "bg-secondary/20 border-transparent"
+                            }`}
+                          >
+                            <Latex> {opt}</Latex>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {q.explanation && (
+                      <div className="bg-secondary/30 p-3 rounded-lg text-sm">
+                        <p className="font-bold text-xs uppercase mb-1">Explanation</p>
+                        <div className="text-muted-foreground">
+                          <MultiParagraphLatex text={q.explanation} />
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="max-w-3xl mx-auto space-y-6 py-6">
         <Button variant="ghost" onClick={() => setView("list")} className="gap-2">
@@ -1504,6 +1948,53 @@ export default function gmatMockTests({ user }: { user: any }) {
             </div>
           </CardContent>
         </Card>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {(["Quant", "Verbal", "DataInsights"] as GmatSection[]).map((sec) => {
+            const sr = res.sectionResults[sec];
+            const meta = SECTION_META[sec];
+            return (
+              <Card key={sec} className="p-4">
+                <p className={`text-xs font-bold uppercase ${meta.textColor} mb-2`}>{meta.label}</p>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <p className="text-lg font-black text-green-600">{sr?.correct ?? "–"}</p>
+                    <p className="text-[10px] text-muted-foreground uppercase">Correct</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-black text-red-600">{sr?.wrong ?? "–"}</p>
+                    <p className="text-[10px] text-muted-foreground uppercase">Wrong</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-black text-yellow-600">{sr?.skipped ?? "–"}</p>
+                    <p className="text-[10px] text-muted-foreground uppercase">Skipped</p>
+                  </div>
+                </div>
+                {typeof sr?.editsUsed === "number" && (
+                  <p className="text-[10px] text-muted-foreground text-center mt-2">
+                    Used {sr.editsUsed} of {MAX_EDITS_PER_SECTION} answer edits
+                  </p>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+
+        <div className="flex gap-3">
+          <Button
+            variant="outline"
+            className="flex-1 gap-2"
+            onClick={() => {
+              setReviewSection(sectionOrder[0] || "Quant");
+              setReviewMode(true);
+            }}
+          >
+            <Eye size={16} /> Review All Questions
+          </Button>
+          <Button className="flex-1 gap-2" onClick={() => setView("list")}>
+            <BarChart3 size={16} /> Back to Tests
+          </Button>
+        </div>
       </div>
     );
   }
