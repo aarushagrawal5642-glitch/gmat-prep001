@@ -505,8 +505,7 @@ function Dashboard({ user, setActiveTab }: { user: UserProfile, setActiveTab: (t
               <p className="text-sm text-muted-foreground text-center py-8 bg-background rounded-xl border border-dashed">No new announcements</p>
             )}
           </div>
-        </div>
-     <div className="space-y-6">
+
   <h2 className="text-xl font-bold flex items-center gap-2">
     Feedback
   </h2>
