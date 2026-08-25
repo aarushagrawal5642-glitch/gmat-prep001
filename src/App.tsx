@@ -506,6 +506,33 @@ function Dashboard({ user, setActiveTab }: { user: UserProfile, setActiveTab: (t
             )}
           </div>
         </div>
+       <div className="space-y-6">
+  <h2 className="text-xl font-bold flex items-center gap-2">
+    <MessageSquare size={20} className="text-primary" />
+    Feedback
+  </h2>
+  <div className="space-y-4">
+    <Card className="shadow-sm border-l-4 border-l-primary">
+      <CardHeader className="p-4 pb-2">
+        <CardTitle className="text-sm font-bold">We'd love to hear from you</CardTitle>
+        <CardDescription className="text-xs">Help us improve</CardDescription>
+      </CardHeader>
+      <CardContent className="p-4 pt-0 space-y-3">
+        <p className="text-sm text-muted-foreground">
+          Your feedback helps us make things better. Let us know what's working, what's not, or what you'd like to see next.
+        </p>
+        
+          href="https://www.reddit.com/r/GMATPrepFree/comments/1vxwsm4/feedback_help_us_improve_the_free_gmat_prep/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-sm font-medium text-primary underline underline-offset-2 hover:opacity-80"
+        >
+          Share your feedback here
+        </a>
+      </CardContent>
+    </Card>
+  </div>
+</div>
       </div>
     </div>
   );
