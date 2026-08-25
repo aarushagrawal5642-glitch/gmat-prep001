@@ -428,7 +428,7 @@ Ambiguous wording that makes a question unfair rather than hard
     - options: string[] (exactly 4)
     - correctAnswer: string (one of the options)
     - explanation: string
-    - difficulty: "Medium" | "Hard"`;
+    - difficulty: "Hard"`;
 
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
