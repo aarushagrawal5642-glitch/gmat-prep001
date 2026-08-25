@@ -506,9 +506,8 @@ function Dashboard({ user, setActiveTab }: { user: UserProfile, setActiveTab: (t
             )}
           </div>
         </div>
-       <div className="space-y-6">
+     <div className="space-y-6">
   <h2 className="text-xl font-bold flex items-center gap-2">
-    <MessageSquare size={20} className="text-primary" />
     Feedback
   </h2>
   <div className="space-y-4">
@@ -522,7 +521,7 @@ function Dashboard({ user, setActiveTab }: { user: UserProfile, setActiveTab: (t
           Your feedback helps us make things better. Let us know what's working, what's not, or what you'd like to see next.
         </p>
         
-          href="https://www.reddit.com/r/GMATPrepFree/comments/1vxwsm4/feedback_help_us_improve_the_free_gmat_prep/"
+          <a href="https://www.reddit.com/r/GMATPrepFree/comments/1vxwsm4/feedback_help_us_improve_the_free_gmat_prep/"
           target="_blank"
           rel="noopener noreferrer"
           className="text-sm font-medium text-primary underline underline-offset-2 hover:opacity-80"
