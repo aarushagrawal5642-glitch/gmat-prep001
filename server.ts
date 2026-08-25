@@ -400,12 +400,28 @@ async function startServer() {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
-      const prompt = `Generate 20 MCQ questions for CAT exam preparation.
-    Distribution:
-    - 7 Quantitative Aptitude (Medium-Hard difficulty)
-    - 7 DILR (Data Interpretation & Logical Reasoning)
-    - 6 VARC (Verbal Ability & Reading Comprehension)
-    Return exactly 20 questions in JSON format.
+      const prompt = `Generate 20 multiple-choice questions for GMAT Focus Edition preparation, calibrated to 700-750+ difficulty (the level that challenges test-takers scoring in the 90th–99th percentile). These questions should require multi-step reasoning, non-obvious approaches, or common traps that even strong students fall into — not just harder arithmetic.
+
+Distribution:
+
+7 Quantitative Reasoning (Problem Solving, 700+ level)
+7 Data Insights (Data Sufficiency, Multi-Source Reasoning, Table/Graphics Analysis — mix formats)
+6 Verbal Reasoning (Critical Reasoning and Reading Comprehension — no Sentence Correction, since GMAT Focus removed it)
+
+Difficulty calibration — each question should have at least one of these:
+
+A tempting wrong answer that results from a common misconception or a plausible-but-flawed shortcut
+Multiple valid-looking solution paths where only one is fully correct
+Information that must be combined non-obviously (especially for Data Sufficiency/Data Insights)
+Time pressure built in — a "trap" that costs slow test-takers time even if they eventually get it right
+For CR/RC: subtle scope shifts, unstated assumptions, or answer choices that are "half-right"
+
+Explicitly avoid:
+
+Straightforward formula-plug-in questions
+Questions solvable by inspection or elimination in under 20 seconds
+Ambiguous wording that makes a question unfair rather than hard
+
     Each question must have:
     - section: "Quantitative" | "DILR" | "VARC"
     - questionText: string
