@@ -3,7 +3,7 @@ name: Create Codespect Scan Branch
 on: 
   workflow_dispatch: 
 
-# Grant explicit write permissions to create the branch
+# Explicitly grant your workflow permission to write new code branches
 permissions:
   contents: write
 
@@ -15,22 +15,21 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Fetches all historical data and tracking branches
+          fetch-depth: 0 # Downloads complete repository history and branches
           token: ${{ secrets.GITHUB_TOKEN }} 
 
-      - name: Configure Git Credentials
+      - name: Configure Git Workspace Identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@://github.com"
 
-      - name: Create and Push Branch Cleanly
+      - name: Fetch, Branch, and Push
         run: |
-          # Fetch latest tracking info from GitHub
+          # Fetch the latest updates directly from your cloud repository
           git fetch origin
           
-          # Force create the branch directly from the origin's default branch
-          # Works seamlessly whether your default branch is named 'main' or 'master'
+          # Safely cut a clean branch directly tracking your cloud's default branch (main/master)
           git checkout -B codespect-full-scan origin/${{ github.event.repository.default_branch }}
           
-          # Push the branch back up to the remote repository
+          # Overwrite and host the target CodeSpect scan branch on GitHub
           git push origin codespect-full-scan --force
