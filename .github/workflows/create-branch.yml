@@ -1,0 +1,31 @@
+name: Create Codespect Scan Branch
+
+on: 
+  workflow_dispatch: # Allows you to trigger this manually from the GitHub UI
+
+jobs:
+  create-branch:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches all history for all branches
+          token: ${{ secrets.GITHUB_TOKEN }} # Uses built-in token to push back to repo
+
+      - name: Configure Git Git Credentials
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@://github.com"
+
+      - name: Create and Push Branch
+        run: |
+          # Ensure main is up to date
+          git checkout main
+          
+          # Create and switch to the new branch
+          git checkout -b codespect-full-scan
+          
+          # Push the new branch back to GitHub
+          git push origin codespect-full-scan --force
