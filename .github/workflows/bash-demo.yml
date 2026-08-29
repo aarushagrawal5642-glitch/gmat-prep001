@@ -1,0 +1,21 @@
+name: Run Bash Script
+
+on: [push] # Triggers the script on every code push
+
+jobs:
+  run-commands:
+    runs-on: ubuntu-latest # Uses a Linux machine with Bash pre-installed
+    
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4 # Downloads your repo files into the runner
+
+      - name: Run a single-line Bash command
+        run: echo "Hello from GitHub Actions!"
+
+      - name: Run multi-line Bash commands
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Listing files:"
+          ls -la
